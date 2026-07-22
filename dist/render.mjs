@@ -161,6 +161,14 @@ function parsePredicate(tokens, line, diagnostics) {
     diagnostics.push(error(line, `expected a reference after '${context}'`));
     return null;
   };
+  const takeAlongFace = () => {
+    const a = chunkText(peek());
+    if (a && isCompass(a) && chunkText(peek(1)) === "edge" && chunkText(peek(2)) === "of") {
+      i += 3;
+      return a;
+    }
+    return void 0;
+  };
   const takeEndpoint = () => {
     const t = tokens[i];
     if (t?.kind === "chunk") {
@@ -208,6 +216,13 @@ function parsePredicate(tokens, line, diagnostics) {
       const args = [];
       while (i < tokens.length) {
         const next = tokens[i];
+        if (c === "area" && (next.kind === "chunk" && next.text === "along")) {
+          i++;
+          const face = takeAlongFace();
+          const ref = takeRef("along");
+          if (ref) args.push(face ? { kind: "relational", form: "along", ref, face } : { kind: "relational", form: "along", ref });
+          continue;
+        }
         if (next.kind !== "chunk") break;
         const pos = parsePositional(next.text);
         if (!pos) break;
@@ -266,8 +281,9 @@ function parsePredicate(tokens, line, diagnostics) {
     }
     if (c === "along") {
       i++;
+      const face = takeAlongFace();
       const ref = takeRef("along");
-      if (ref) result.placements.push({ kind: "relational", form: "along", ref });
+      if (ref) result.placements.push(face ? { kind: "relational", form: "along", ref, face } : { kind: "relational", form: "along", ref });
       continue;
     }
     if (c === "from") {
@@ -408,7 +424,7 @@ landmark : feature
 ; zones
 realm : zone
 region : zone
-border : path
+border : zone
 
 ; annotation (spec 07)
 note : feature
@@ -617,7 +633,8 @@ var KNOWN_HEADER_KEYS = /* @__PURE__ */ new Set([
   "compass",
   "numbers",
   "levels",
-  "level"
+  "level",
+  "ground"
 ]);
 var UNIVERSAL_SECTIONS = /* @__PURE__ */ new Set(["vocab", "gm", "labels"]);
 var SECTIONS_BY_TYPE = {
@@ -1187,26 +1204,43 @@ function rng(seed) {
     return ((t ^ t >>> 14) >>> 0) / 4294967296;
   };
 }
-function meander(points, amount, random) {
-  let current = points;
-  for (let round = 0; round < 2; round++) {
-    const next = [];
-    for (let i = 0; i < current.length - 1; i++) {
-      const a = current[i];
-      const b = current[i + 1];
-      next.push(a);
-      const mx = (a.x + b.x) / 2;
-      const my = (a.y + b.y) / 2;
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const len = Math.hypot(dx, dy) || 1;
-      const off = (random() - 0.5) * amount * (round === 0 ? 1 : 0.5);
-      next.push({ x: mx + -dy / len * off, y: my + dx / len * off });
-    }
-    next.push(current[current.length - 1]);
-    current = next;
+function hashString(s) {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  return h >>> 0;
+}
+function hashSeed(...nums) {
+  let h = 2166136261 >>> 0;
+  for (const n of nums) {
+    const v = Math.round(n * 8) | 0;
+    h = Math.imul(h ^ v & 255, 16777619);
+    h = Math.imul(h ^ v >> 8 & 255, 16777619);
+    h = Math.imul(h ^ v >> 16 & 255, 16777619);
   }
-  return current;
+  return h >>> 0;
+}
+function catmullRom(pts, samples = 8, closed = false) {
+  if (pts.length < 3) return pts.slice();
+  const P = (i) => closed ? pts[(i % pts.length + pts.length) % pts.length] : pts[Math.max(0, Math.min(pts.length - 1, i))];
+  const out = [];
+  const segs = closed ? pts.length : pts.length - 1;
+  for (let i = 0; i < segs; i++) {
+    const p0 = P(i - 1);
+    const p1 = P(i);
+    const p2 = P(i + 1);
+    const p3 = P(i + 2);
+    for (let s = 0; s < samples; s++) {
+      const t = s / samples;
+      const t2 = t * t;
+      const t3 = t2 * t;
+      out.push({
+        x: 0.5 * (2 * p1.x + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
+        y: 0.5 * (2 * p1.y + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3)
+      });
+    }
+  }
+  if (!closed) out.push(pts[pts.length - 1]);
+  return out;
 }
 function blob(center, radius, random, segments = 14) {
   const pts = [];
@@ -1720,6 +1754,7 @@ var TERRAIN_FILLS = {
   mud: "#c8b294",
   sand: "#ecdfb8",
   grass: "#dde5b8",
+  island: "#e9e2cc",
   rubble: "#cfc8bc",
   slope: "#d9d0bd",
   ford: "#cfd4b8",
@@ -1739,12 +1774,14 @@ var PATH_STROKES = {
   border: { stroke: "#a05a5a", dash: "8 4" }
 };
 var TIERS = {
-  capital: { r: 6, font: 15, weight: "bold" },
-  city: { r: 5, font: 13, weight: "bold" },
-  town: { r: 4, font: 11, weight: "normal" },
-  village: { r: 3, font: 10, weight: "normal" },
-  hamlet: { r: 2.5, font: 9, weight: "normal" },
-  settlement: { r: 3.5, font: 10, weight: "normal" }
+  // Fonts sit well below the 18px map title — a capital is the biggest
+  // SETTLEMENT, not a rival heading (owner round eleven).
+  capital: { r: 6, font: 13, weight: "bold" },
+  city: { r: 5, font: 11, weight: "bold" },
+  town: { r: 4, font: 10, weight: "normal" },
+  village: { r: 3, font: 9, weight: "normal" },
+  hamlet: { r: 2.5, font: 8, weight: "normal" },
+  settlement: { r: 3.5, font: 9, weight: "normal" }
 };
 var SIDE_COLORS = {
   party: "#4a7ab5",
@@ -1849,6 +1886,12 @@ var Theme = class _Theme {
     return this.glyphs[chosen] ?? null;
   }
 };
+function wordTint(word) {
+  let h = 0;
+  for (let i = 0; i < word.length; i++) h = h * 31 + word.charCodeAt(i) >>> 0;
+  const hue = Math.round(h * 137.508 % 360);
+  return `hsl(${hue} 32% 55%)`;
+}
 var tierOf = (word) => word && TIERS[word] || { r: 3, font: 10, weight: "normal" };
 var tierFor = (chain) => {
   for (const word of chain) if (TIERS[word]) return TIERS[word];
@@ -2629,10 +2672,13 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
           sightBlockers.length > 0 ? el("polygon", { points: pointsAttr(visibilityPolygon(center, radius, sightBlockers)), fill: model.theme.surface("light", "fill", "#ffd98a"), opacity: 0.22 }) : el("circle", { cx: center.x, cy: center.y, r: radius, fill: model.theme.surface("light", "fill", "#ffd98a"), opacity: 0.22 })
         );
       }
+      const themed0 = model.theme.glyphFor(chainR, center.x, center.y);
+      const glyphless = !themed0 && !["campfire", "torch", "brazier", "lantern", "wagon", "stairs", "ramp"].some((w) => chainR.includes(w));
+      const slabFill = glyphless ? model.theme.prop(chainR, "fill") ?? wordTint(chainR[chainR.length - 1] ?? "") : "#8f8474";
       footprintParts.push(
-        el("rect", { x: r.x + 3, y: r.y + 3, width: r.w - 6, height: r.h - 6, fill: "#8f8474", stroke: INK, "stroke-width": 1.2, rx: 2 })
+        el("rect", { x: r.x + 3, y: r.y + 3, width: r.w - 6, height: r.h - 6, fill: slabFill, stroke: INK, "stroke-width": 1.2, rx: 2 })
       );
-      const themed = model.theme.glyphFor(chainR, center.x, center.y);
+      const themed = themed0;
       if (themed) {
         const ink = model.theme.surface("ink", "fill", INK);
         const scale = Math.min(r.w, r.h) / 24 * 0.7;
@@ -2677,7 +2723,8 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
     } else if (fallbackGlyph(e, chain, c, 1, parts)) {
       drewFallback = true;
     } else {
-      parts.push(el("rect", { x: c.x - 6, y: c.y - 6, width: 12, height: 12, fill: "#8f8474", stroke: INK, "stroke-width": 1 }));
+      const fill = model.theme.prop(chain, "fill") ?? wordTint(chain[chain.length - 1] ?? "");
+      parts.push(el("rect", { x: c.x - 6, y: c.y - 6, width: 12, height: 12, fill, stroke: INK, "stroke-width": 1 }));
     }
     if (!e.name && !hasBattlemapGlyph(chain) && !themedGlyph && !drewFallback && !titleEl && e.typeWord) {
       parts.unshift(el("title", {}, e.typeWord));
@@ -2708,26 +2755,85 @@ function extendToFrame(pts, addresses, frame) {
 }
 
 // packages/render-svg/src/labels.ts
+var TEXT_WEIGHT = 3;
 var LabelPlacer = class {
   boxes = [];
-  /** Reserve a non-label obstacle (e.g. a glyph) so labels avoid it. */
-  block(x, y, w, h) {
-    this.boxes.push({ x, y, w, h });
+  bounds;
+  /** With bounds, candidates that would leave the viewport are rejected. */
+  constructor(bounds) {
+    this.bounds = bounds ?? null;
+  }
+  inBounds(box) {
+    if (!this.bounds) return true;
+    return box.x >= 2 && box.y >= 2 && box.x + box.w <= this.bounds.w - 2 && box.y + box.h <= this.bounds.h - 2;
+  }
+  /** Reserve a non-label obstacle so labels avoid it. Weight 1 = thin geometry; pass 3 for text-like content. */
+  block(x, y, w, h, weight = 1) {
+    this.boxes.push({ x, y, w, h, weight });
+  }
+  /** A removable obstacle: reserve now, release later (name homes — a spot held for a label that hasn't placed yet). */
+  tempBlock(x, y, w, h, weight = 1) {
+    const box = { x, y, w, h, weight };
+    this.boxes.push(box);
+    return box;
+  }
+  release(handle) {
+    const i = this.boxes.indexOf(handle);
+    if (i >= 0) this.boxes.splice(i, 1);
   }
   boxFor(x, y, textStr, fontSize, anchor, widthPx) {
     const w = widthPx ?? textStr.length * fontSize * 0.58;
     const h = fontSize * 1.1;
     const bx = anchor === "middle" ? x - w / 2 : anchor === "end" ? x - w : x;
-    return { x: bx, y: y - h, w, h };
+    return { x: bx, y: y - h, w, h, weight: TEXT_WEIGHT };
   }
   tryClaim(x, y, textStr, fontSize, anchor, widthPx) {
     const box = this.boxFor(x, y, textStr, fontSize, anchor, widthPx);
+    if (!this.inBounds(box)) return false;
     if (this.boxes.some((b) => intersects(b, box))) return false;
     this.boxes.push(box);
     return true;
   }
   claim(x, y, textStr, fontSize, anchor, widthPx) {
     this.boxes.push(this.boxFor(x, y, textStr, fontSize, anchor, widthPx));
+  }
+  /**
+   * Claim a candidate box if free; returns whether it was claimed. For label
+   * forms the placer can't position itself (e.g. textPath along a curve) —
+   * the caller proposes, the placer arbitrates and remembers.
+   */
+  claimIfFree(x, y, textStr, fontSize, anchor, widthPx) {
+    return this.tryClaim(x, y, textStr, fontSize, anchor, widthPx);
+  }
+  /** Claim an explicit centered box if free (curve labels size their own). */
+  claimBoxIfFree(cx, top, wpx, h) {
+    const box = { x: cx - wpx / 2, y: top, w: wpx, h };
+    if (!this.inBounds(box)) return false;
+    if (this.boxes.some((b) => intersects(b, box))) return false;
+    this.boxes.push(box);
+    return true;
+  }
+  /**
+   * Overlap cost of a centered box WITHOUT claiming it — candidate sweeps
+   * probe every option first and claim only the winner, so a rejected
+   * attempt never leaves phantom boxes behind to push later labels around.
+   */
+  boxCost(cx, top, wpx, h) {
+    return this.overlapArea({ x: cx - wpx / 2, y: top, w: wpx, h });
+  }
+  /** Unconditionally claim a centered box (the winner of a probed sweep). Curve-label text. */
+  claimBox(cx, top, wpx, h) {
+    this.boxes.push({ x: cx - wpx / 2, y: top, w: wpx, h, weight: TEXT_WEIGHT });
+  }
+  /** Occupied area within a rect (bounds-free probe — density checks). */
+  occupancy(x, y, w, h) {
+    let area = 0;
+    for (const b of this.boxes) {
+      const ox = Math.max(0, Math.min(x + w, b.x + b.w) - Math.max(x, b.x));
+      const oy = Math.max(0, Math.min(y + h, b.y + b.h) - Math.max(y, b.y));
+      area += ox * oy;
+    }
+    return area;
   }
   /**
    * Line-feature labels: candidates are points ALONG the feature (mid-course
@@ -2743,6 +2849,16 @@ var LabelPlacer = class {
     const first = candidates[0];
     return { x: first.x, y: this.place(first.x, first.y, textStr, fontSize, anchor) };
   }
+  overlapArea(box) {
+    let area = 0;
+    for (const b of this.boxes) {
+      const ox = Math.max(0, Math.min(box.x + box.w, b.x + b.w) - Math.max(box.x, b.x));
+      const oy = Math.max(0, Math.min(box.y + box.h, b.y + b.h) - Math.max(box.y, b.y));
+      area += ox * oy * (b.weight ?? 1);
+    }
+    if (!this.inBounds(box)) area += 1e6;
+    return area;
+  }
   /** Returns the chosen y (x is never moved — horizontal shifts read as errors on maps). */
   place(x, y, textStr, fontSize, anchor, widthPx) {
     const h = fontSize * 1.1;
@@ -2751,9 +2867,62 @@ var LabelPlacer = class {
     for (const dy of offsets) {
       if (this.tryClaim(x, y + dy, textStr, fontSize, anchor, widthPx)) return y + dy;
     }
-    const last = offsets[offsets.length - 1];
-    this.claim(x, y + last, textStr, fontSize, anchor, widthPx);
-    return y + last;
+    let best = 0;
+    let bestScore = Infinity;
+    offsets.forEach((dy, i) => {
+      const score = this.overlapArea(this.boxFor(x, y + dy, textStr, fontSize, anchor, widthPx)) + i * fontSize * 2;
+      if (score < bestScore) {
+        bestScore = score;
+        best = dy;
+      }
+    });
+    this.claim(x, y + best, textStr, fontSize, anchor, widthPx);
+    return y + best;
+  }
+  /**
+   * Dense-map conduct (spec 07 §5): shrink before moving far, omit before
+   * overwriting. Tries the normal nudge ladder at the base size, then
+   * retries the whole ladder at smaller sizes (floor 8px); if even the
+   * least-bad shrunk spot would cover most of the label with other text,
+   * returns null — the caller drops the label rather than scrawl it.
+   */
+  placeOrDrop(x, y, textStr, fontSize, anchor, dxs = [0], widthPx, allow) {
+    const floor = Math.max(8, fontSize - 3);
+    const offsetsAt = (size) => {
+      const step = size * 1.1 + 2;
+      const out = [];
+      for (const dy of [0, step, -step, 2 * step, -2 * step]) for (const dx of dxs) out.push({ dx, dy });
+      return out.filter((o) => !allow || allow(x + o.dx, y + o.dy));
+    };
+    for (let size = fontSize; size >= floor; size--) {
+      for (const o of offsetsAt(size)) {
+        if (this.tryClaim(x + o.dx, y + o.dy, textStr, size, anchor, widthPx)) return { x: x + o.dx, y: y + o.dy, size };
+      }
+    }
+    const leastBad = (size) => {
+      let best = { dx: 0, dy: 0 };
+      let bestScore = Infinity;
+      offsetsAt(size).forEach((o, i) => {
+        const score = this.overlapArea(this.boxFor(x + o.dx, y + o.dy, textStr, size, anchor, widthPx)) + i * size;
+        if (score < bestScore) {
+          bestScore = score;
+          best = o;
+        }
+      });
+      const box = this.boxFor(x + best.dx, y + best.dy, textStr, size, anchor, widthPx);
+      return { o: best, score: bestScore, area: box.w * box.h };
+    };
+    for (let size = fontSize; size >= floor; size--) {
+      const b2 = leastBad(size);
+      if (b2.score <= b2.area * 0.12) {
+        this.claim(x + b2.o.dx, y + b2.o.dy, textStr, size, anchor, widthPx);
+        return { x: x + b2.o.dx, y: y + b2.o.dy, size };
+      }
+    }
+    const b = leastBad(floor);
+    if (b.score > b.area * 0.5) return null;
+    this.claim(x + b.o.dx, y + b.o.dy, textStr, floor, anchor, widthPx);
+    return { x: x + b.o.dx, y: y + b.o.dy, size: floor };
   }
 };
 var SideLabelPlacer = class extends LabelPlacer {
@@ -2764,21 +2933,85 @@ var SideLabelPlacer = class extends LabelPlacer {
    */
   placeBeside(rightX, leftX, y, textStr, fontSize) {
     const step = fontSize * 1.1 + 2;
+    const midX = (rightX + leftX) / 2;
     const candidates = [
       { x: rightX, y, anchor: "start" },
       { x: leftX, y, anchor: "end" },
+      { x: midX, y: y - step, anchor: "middle" },
+      { x: midX, y: y + step + 4, anchor: "middle" },
       { x: rightX, y: y + step, anchor: "start" },
       { x: leftX, y: y + step, anchor: "end" },
       { x: rightX, y: y - step, anchor: "start" },
-      { x: leftX, y: y - step, anchor: "end" },
-      { x: rightX, y: y + 2 * step, anchor: "start" }
+      { x: leftX, y: y - step, anchor: "end" }
     ];
     for (const c of candidates) {
       if (this.tryClaim(c.x, c.y, textStr, fontSize, c.anchor)) return c;
     }
-    const last = candidates[candidates.length - 1];
-    this.claim(last.x, last.y, textStr, fontSize, last.anchor);
-    return last;
+    let best = candidates[0];
+    let bestScore = Infinity;
+    candidates.forEach((c, i) => {
+      const score = this.overlapArea(this.boxFor(c.x, c.y, textStr, fontSize, c.anchor)) + i * fontSize * 2;
+      if (score < bestScore) {
+        bestScore = score;
+        best = c;
+      }
+    });
+    this.claim(best.x, best.y, textStr, fontSize, best.anchor);
+    return best;
+  }
+  /**
+   * Dense-map conduct for point labels (spec 07 §5): shrink before moving,
+   * omit before overwriting. Sweeps the beside-candidates at the base size,
+   * then smaller (floor 8px); when even the least-bad shrunk candidate would
+   * mostly cover other text, returns null and the marker goes unnamed —
+   * an unlabeled point reads better than two names on top of each other.
+   */
+  placeBesideOrDrop(rightX, leftX, y, textStr, fontSize) {
+    const floor = Math.max(8, fontSize - 3);
+    const candidatesAt = (size) => {
+      const step = size * 1.1 + 2;
+      const midX = (rightX + leftX) / 2;
+      return [
+        { x: rightX, y, anchor: "start" },
+        { x: leftX, y, anchor: "end" },
+        { x: midX, y: y - step, anchor: "middle" },
+        { x: midX, y: y + step + 4, anchor: "middle" },
+        { x: rightX, y: y + step, anchor: "start" },
+        { x: leftX, y: y + step, anchor: "end" },
+        { x: rightX, y: y - step, anchor: "start" },
+        { x: leftX, y: y - step, anchor: "end" }
+      ];
+    };
+    for (let size = fontSize; size >= floor; size--) {
+      for (const c of candidatesAt(size)) {
+        if (this.tryClaim(c.x, c.y, textStr, size, c.anchor)) return { ...c, size };
+      }
+    }
+    const leastBad = (size) => {
+      const finalists = candidatesAt(size);
+      let best = finalists[0];
+      let bestScore = Infinity;
+      finalists.forEach((c, i) => {
+        const score = this.overlapArea(this.boxFor(c.x, c.y, textStr, size, c.anchor)) + i * size * 2;
+        if (score < bestScore) {
+          bestScore = score;
+          best = c;
+        }
+      });
+      const box = this.boxFor(best.x, best.y, textStr, size, best.anchor);
+      return { c: best, score: bestScore, area: box.w * box.h };
+    };
+    for (let size = fontSize; size >= floor; size--) {
+      const b2 = leastBad(size);
+      if (b2.score <= b2.area * 0.12) {
+        this.claim(b2.c.x, b2.c.y, textStr, size, b2.c.anchor);
+        return { ...b2.c, size };
+      }
+    }
+    const b = leastBad(floor);
+    if (b.score > b.area * 0.5) return null;
+    this.claim(b.c.x, b.c.y, textStr, floor, b.c.anchor);
+    return { ...b.c, size: floor };
   }
 };
 var intersects = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
@@ -2855,7 +3088,9 @@ function renderHexcrawl(model, body) {
   const labelLayer = [];
   const numbersOn = model.header.get("numbers") === "on";
   const gmMode = model.mode === "gm";
-  const placer = new LabelPlacer();
+  const bounds = hexFrame(model);
+  const placer = new LabelPlacer({ w: bounds.w, h: bounds.h });
+  if (model.doc.title) placer.block(0, 0, model.doc.title.length * 10 + 30, 34);
   for (let row = 1; row <= rows; row++) {
     for (let col = 1; col <= cols; col++) {
       const c = center(col, row);
@@ -3136,7 +3371,8 @@ function buildLegend(model, width) {
             parts.push(el("line", { x1: x + 7 - w, y1: ty, x2: x + 7 + w, y2: ty, stroke: INK, "stroke-width": 1.4 }));
           }
         } else {
-          parts.push(el("rect", { x: x + 2, y: y - 5, width: 10, height: 10, fill: "#8f8474", stroke: INK, "stroke-width": 1 }));
+          const fill = model.theme.prop(chain, "fill") ?? wordTint(chain[chain.length - 1] ?? "");
+          parts.push(el("rect", { x: x + 2, y: y - 5, width: 10, height: 10, fill, stroke: INK, "stroke-width": 1 }));
         }
         break;
       }
@@ -3147,11 +3383,13 @@ function buildLegend(model, width) {
 }
 
 // packages/render-svg/src/region.ts
-function renderRegion(model, body, size) {
+function renderRegion(model, body, size, diagnostics = []) {
   const { w, h, scale } = size;
   const theme = model.theme;
   const ink = theme.surface("ink", "fill", INK);
-  const random = rng(model.seed + 7);
+  const groundWord = model.header.get("ground")?.trim();
+  const groundFill = groundWord ? theme.terrainFill(groundWord.split(/\s+/)) : null;
+  if (groundFill) body.push(el("rect", { x: 0, y: 0, width: w, height: h, fill: groundFill }));
   const resolved = /* @__PURE__ */ new Map();
   const byName = /* @__PURE__ */ new Map();
   let waterVector = null;
@@ -3166,11 +3404,87 @@ function renderRegion(model, body, size) {
     if (r.polygon) return centroid(r.polygon);
     return null;
   };
-  const meanderAmount = (pts, chain) => {
-    let length = 0;
-    for (let i = 0; i < pts.length - 1; i++) length += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
-    const factor = chain.includes("river") ? 0.055 : chain.includes("road") ? 0.02 : 0.035;
-    return Math.min(32, Math.max(6, length * factor));
+  const coastCurves = [];
+  const blobOrdinals = /* @__PURE__ */ new Map();
+  const near = (a, b) => Math.abs(a.x - b.x) < 0.01 && Math.abs(a.y - b.y) < 0.01;
+  const runMatches = (pts, start, raw, reversed) => {
+    if (start + raw.length > pts.length) return false;
+    for (let k = 0; k < raw.length; k++) {
+      const r = reversed ? raw[raw.length - 1 - k] : raw[k];
+      if (!near(pts[start + k], r)) return false;
+    }
+    return true;
+  };
+  const assembleWaterBoundary = (pts) => {
+    const out = [];
+    let i = 0;
+    while (i < pts.length) {
+      let advanced = false;
+      for (const c of coastCurves) {
+        if (c.raw.length >= 2 && runMatches(pts, i, c.raw, false)) {
+          out.push(...c.finished);
+          i += c.raw.length;
+          advanced = true;
+          break;
+        }
+        if (c.raw.length >= 2 && runMatches(pts, i, c.raw, true)) {
+          out.push(...[...c.finished].reverse());
+          i += c.raw.length;
+          advanced = true;
+          break;
+        }
+      }
+      if (!advanced) {
+        out.push(pts[i]);
+        i++;
+      }
+    }
+    return out;
+  };
+  const ringPathBetween = (ring, a, b, face) => {
+    const closed = [...ring, ring[0]];
+    const param = (target) => {
+      let best = { d: Infinity, i: 0, p: closed[0] };
+      for (let i = 0; i < closed.length - 1; i++) {
+        const p1 = closed[i];
+        const p2 = closed[i + 1];
+        const dx = p2.x - p1.x;
+        const dy = p2.y - p1.y;
+        const lenSq = dx * dx + dy * dy || 1;
+        const t = Math.max(0, Math.min(1, ((target.x - p1.x) * dx + (target.y - p1.y) * dy) / lenSq));
+        const p = { x: p1.x + t * dx, y: p1.y + t * dy };
+        const d = Math.hypot(p.x - target.x, p.y - target.y);
+        if (d < best.d) best = { d, i, p };
+      }
+      return best;
+    };
+    const pa = param(a);
+    const pb = param(b);
+    const n = ring.length;
+    const walk2 = (forward) => {
+      const out = [pa.p];
+      let i = pa.i;
+      while (i !== pb.i) {
+        i = forward ? (i + 1) % n : (i - 1 + n) % n;
+        out.push(ring[forward ? i : (i + 1) % n]);
+        if (out.length > n + 2) break;
+      }
+      out.push(pb.p);
+      return out;
+    };
+    const arcs = [walk2(true), walk2(false)];
+    const vec = COMPASS_VECTORS[face] ?? { x: 0, y: -1 };
+    const score = (arc) => arc.reduce((s, p) => s + p.x * vec.x + p.y * vec.y, 0) / arc.length;
+    return score(arcs[0]) >= score(arcs[1]) ? arcs[0] : arcs[1];
+  };
+  const lineAspect = (ref, face, a, b, line) => {
+    const target = lookup(ref);
+    if (face && target?.polygon && a && b) return ringPathBetween(target.polygon, a, b, face);
+    if (target?.polyline) return a && b ? subPolylineBetween(target.polyline, a, b) : target.polyline;
+    if (target?.polygon) {
+      diagnostics.push({ severity: "warning", line, message: `along ${ref.value} is ambiguous: it is an area with no crest line \u2014 name a face: along <compass> edge of ${ref.value} (ADR 0013)` });
+    }
+    return null;
   };
   const resolveEntity = (e) => {
     const chain = model.chainOf(e.typeWord);
@@ -3187,14 +3501,51 @@ function renderRegion(model, body, size) {
         if (p.shape === "blob") {
           const center = pts[0] ?? out.point ?? { x: w / 2, y: h / 2 };
           const radius = measureToNumber(pairOf(e.pairs, "size") ?? "40") / 2 * scale;
-          out.polygon = blob(center, radius, random);
+          const idKey = `${entityAnchor(e) ?? e.typeWord ?? "blob"}:${radius}`;
+          const n = blobOrdinals.get(idKey) ?? 0;
+          blobOrdinals.set(idKey, n + 1);
+          out.polygon = catmullRom(blob(center, radius, rng(hashSeed(model.seed, radius, hashString(idKey), n))), 5, true);
           out.point = center;
           out.radius = radius;
         } else if (p.shape === "area") {
-          out.polygon = pts;
+          const spliced = [];
+          const spans = [];
+          for (let k = 0; k < p.args.length; k++) {
+            const arg = p.args[k];
+            if (arg.kind === "point") {
+              spliced.push(toXY(arg));
+              continue;
+            }
+            if (arg.kind !== "relational" || arg.form !== "along") continue;
+            const prev = spliced[spliced.length - 1];
+            let next = null;
+            for (let m = k + 1; m < p.args.length; m++) {
+              const b = p.args[m];
+              if (b.kind === "point") {
+                next = toXY(b);
+                break;
+              }
+            }
+            next ??= spliced[0] ?? null;
+            if (prev && next) {
+              const seg = lineAspect(arg.ref, arg.face, prev, next, e.line);
+              if (seg) {
+                const refKey = arg.ref.form === "id" ? arg.ref.value : byName.get(arg.ref.value) ?? slugify(arg.ref.value);
+                spans.push({ ref: arg.ref.value, refKey, start: spliced.length - 1, end: spliced.length + seg.length });
+                spliced.push(...seg);
+              }
+            }
+          }
+          if (spans.length) out.alongSpans = spans;
+          out.polygon = e.section === "water" ? assembleWaterBoundary(spliced) : spliced;
         } else {
-          out.polyline = meander(pts, meanderAmount(pts, chain), random);
+          out.polyline = catmullRom(pts, 8);
           out.ridge = p.shape === "ridge";
+          if (out.ridge) {
+            const declared = pairOf(e.pairs, "width");
+            out.beltW = declared ? measureToNumber(declared) * scale : 28;
+          }
+          if (chain.includes("coastline")) coastCurves.push({ raw: pts, finished: out.polyline });
         }
       } else if (p.kind === "relational") {
         switch (p.form) {
@@ -3212,7 +3563,7 @@ function renderRegion(model, body, size) {
           }
           case "side-of": {
             const r = lookup(p.ref);
-            if (r?.polyline) out.halfPlane = { compass: p.compass, of: r.polyline };
+            if (r?.polyline) out.halfPlane = { compass: p.compass, of: r.polyline, refKey: p.ref.form === "id" ? p.ref.value : byName.get(p.ref.value) ?? slugify(p.ref.value) };
             else {
               const base = refPoint(p.ref);
               if (base) {
@@ -3241,30 +3592,44 @@ function renderRegion(model, body, size) {
             break;
           }
           case "from-to": {
-            const endpoint = (ep) => ep.point ? toXY(ep.point) : ep.at.kind === "point" ? toXY(ep.at) : refPoint(ep.at);
-            const a = endpoint(p.from);
-            const b = endpoint(p.to);
-            if (a && b) {
-              const raw = [a, ...p.via.map(toXY), b];
-              out.polyline = meander(raw, meanderAmount(raw, chain), random);
+            const ring = (poly) => [...poly, poly[0]];
+            const resolveEnd = (ep) => {
+              if (ep.at.kind === "point") return { p: toXY(ep.at), shore: null };
+              const target = lookup(ep.at);
+              if (ep.point) {
+                const raw = toXY(ep.point);
+                if (target?.polyline) return { p: nearestOnPolyline(target.polyline, raw), shore: null };
+                if (target?.polygon) return { p: nearestOnPolyline(ring(target.polygon), raw), shore: null };
+                return { p: raw, shore: null };
+              }
+              return { p: refPoint(ep.at), shore: target?.polygon ? ring(target.polygon) : null };
+            };
+            const A = resolveEnd(p.from);
+            const B = resolveEnd(p.to);
+            if (A.p && B.p) {
+              const via = p.via.map(toXY);
+              const a = A.shore ? nearestOnPolyline(A.shore, via[0] ?? B.p) : A.p;
+              const b = B.shore ? nearestOnPolyline(B.shore, via[via.length - 1] ?? A.p) : B.p;
+              out.polyline = catmullRom([a, ...via, b], 8);
+              if (chain.includes("coastline")) coastCurves.push({ raw: [a, ...via, b], finished: out.polyline });
             }
             break;
           }
           case "along": {
-            const line = lookup(p.ref)?.polyline;
-            if (line) {
-              if (out.polyline) {
-                const first = out.polyline[0];
-                const last = out.polyline[out.polyline.length - 1];
-                let guide = subPolylineBetween(line, first, last);
+            if (out.polyline) {
+              const first = out.polyline[0];
+              const last = out.polyline[out.polyline.length - 1];
+              let guide = lineAspect(p.ref, p.face, first, last, e.line);
+              if (guide) {
                 if (waterVector) {
                   const vec = waterVector;
                   guide = guide.map((pt) => ({ x: pt.x - vec.x * 4, y: pt.y - vec.y * 4 }));
                 }
                 out.polyline = [first, ...guide, last];
-              } else {
-                out.polyline = line.map((pt) => ({ ...pt }));
               }
+            } else {
+              const line = lineAspect(p.ref, p.face, null, null, e.line);
+              if (line) out.polyline = line.map((pt) => ({ ...pt }));
             }
             break;
           }
@@ -3285,68 +3650,304 @@ function renderRegion(model, body, size) {
     return out;
   };
   const items = [];
+  const chainByKey = /* @__PURE__ */ new Map();
   for (const e of model.entities) {
     const r = resolveEntity(e);
     const key = keyOf2(e);
     resolved.set(key, r);
     if (e.name) byName.set(e.name, key);
     if (r.halfPlane && e.section === "water") waterVector = COMPASS_VECTORS[r.halfPlane.compass] ?? null;
-    items.push({ e, r, chain: model.chainOf(e.typeWord) });
+    const chain = model.chainOf(e.typeWord);
+    chainByKey.set(key, chain);
+    items.push({ e, r, chain });
   }
-  const placer = new SideLabelPlacer();
+  const frontierFills = /* @__PURE__ */ new Map();
+  for (const it of items) {
+    if (it.r.halfPlane?.refKey && it.e.section !== "water" && it.e.archetype !== "zone") {
+      frontierFills.set(it.r.halfPlane.refKey, { fill: theme.terrainFill(it.chain), zonePoly: halfPlanePolygon(it.r.halfPlane, w, h) });
+    }
+    if (it.r.alongSpans && it.r.polygon && it.e.archetype !== "zone") {
+      for (const s of it.r.alongSpans) {
+        if (!s.refKey) continue;
+        const ch = chainByKey.get(s.refKey);
+        if (ch && !ch.includes("coastline")) frontierFills.set(s.refKey, { fill: theme.terrainFill(it.chain), zonePoly: it.r.polygon });
+      }
+    }
+  }
+  const placer = new SideLabelPlacer({ w, h });
+  if (model.doc.title) placer.block(0, 0, model.doc.title.length * 10 + 30, 34, 3);
+  if (model.header.get("compass") === "on") placer.block(w - 60, 10, 55, 62, 3);
   for (const { e, r, chain } of items) {
     if (r.point) {
       const tier = tierFor(chain);
-      placer.block(r.point.x - tier.r - 1, r.point.y - tier.r - 1, tier.r * 2 + 2, tier.r * 2 + 2);
+      placer.block(r.point.x - tier.r - 1, r.point.y - tier.r - 1, tier.r * 2 + 2, tier.r * 2 + 2, 2);
     }
   }
   const overridden = (e) => model.labelOverrides.some(
     (o) => o.target.form === "name" ? o.target.value === e.name : e.ids.includes(o.target.value)
   );
-  const layers = { areas: [], lines: [], points: [], labels: [] };
+  const beltObstacles = /* @__PURE__ */ new Map();
+  for (const { e, r } of items) {
+    if (!r.polyline) continue;
+    if (r.ridge) {
+      const half = (r.beltW ?? 28) / 2 + 3;
+      const own = [];
+      let acc = 0;
+      let lastAt = -Infinity;
+      for (let i = 0; i < r.polyline.length; i++) {
+        if (i > 0) {
+          const a = r.polyline[i - 1];
+          const b = r.polyline[i];
+          acc += Math.hypot(b.x - a.x, b.y - a.y);
+        }
+        if (acc - lastAt >= half * 1.6) {
+          const pt = r.polyline[i];
+          const spec = [pt.x - half, pt.y - half, half * 2, half * 2];
+          own.push({ spec, handle: placer.tempBlock(spec[0], spec[1], spec[2], spec[3], 0.3) });
+          lastAt = acc;
+        }
+      }
+      beltObstacles.set(keyOf2(e), own);
+    } else {
+      for (const pt of r.polyline) {
+        placer.block(pt.x - 3, pt.y - 3, 6, 6);
+      }
+    }
+  }
+  const pip = (pt, poly) => {
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const a = poly[i];
+      const b = poly[j];
+      if (a.y > pt.y !== b.y > pt.y && pt.x < (b.x - a.x) * (pt.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+    }
+    return inside;
+  };
+  const nameHomes = [];
+  for (const { e, r, chain } of items) {
+    if (!r.polygon || !e.name || e.flags.includes("nolabel") || overridden(e) || !labelsOn(model)) continue;
+    if (e.archetype === "zone") continue;
+    const watery = e.section === "water" || chain.some((word) => word === "sea" || word === "water");
+    if (watery && !chain.includes("lake")) continue;
+    const c = r.point ?? centroid(r.polygon);
+    const wpx = e.name.length * 11 * 0.58 + 8;
+    nameHomes.push(placer.tempBlock(c.x - wpx / 2, c.y - 26, wpx, 42, 0.6));
+  }
+  const alongAt = (pts, t) => {
+    let total = 0;
+    for (let i = 0; i < pts.length - 1; i++) total += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+    let want = total * t;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const d = Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+      if (want <= d && d > 0) {
+        const f = want / d;
+        return {
+          p: { x: pts[i].x + (pts[i + 1].x - pts[i].x) * f, y: pts[i].y + (pts[i + 1].y - pts[i].y) * f },
+          dir: { x: (pts[i + 1].x - pts[i].x) / d, y: (pts[i + 1].y - pts[i].y) / d }
+        };
+      }
+      want -= d;
+    }
+    return { p: pts[pts.length - 1], dir: { x: 1, y: 0 } };
+  };
+  const layers = { water: [], realms: [], areas: [], lines: [], points: [], labels: [] };
+  let pathLabelCount = 0;
+  const labelBuckets = [[], [], [], [], []];
+  const labelJobs = [];
+  const deferLabel = (priority, run) => void labelJobs.push({ priority, run });
+  if (nameHomes.length) deferLabel(2.5, () => nameHomes.forEach((b) => placer.release(b)));
+  const massifs = [];
+  const realmInfos = [];
+  const borderDecls = [];
   for (const { e, r, chain } of items) {
     const anchor = anchorAttr(model, e);
     const title = gmTitleFor(model, e);
     const titleEl = title ? el("title", {}, title) : "";
     const wordFill = theme.terrainFill(chain);
+    if (chain.includes("border")) {
+      borderDecls.push(e);
+      continue;
+    }
     if (r.halfPlane) {
       const poly = halfPlanePolygon(r.halfPlane, w, h);
       const isWater = e.section === "water";
-      layers.areas.push(
-        el(
-          "g",
-          { id: anchor },
-          titleEl,
-          el("polygon", { points: pointsAttr(poly), fill: isWater ? theme.terrainFill(["sea"]) : wordFill, opacity: isWater ? 1 : 0.14 })
-        )
-      );
+      const isZone = !isWater && e.archetype === "zone";
+      if (isWater) {
+        layers.water.push(el("g", { id: anchor }, titleEl, el("polygon", { points: pointsAttr(poly), fill: theme.terrainFill(["sea"]) })));
+      } else if (isZone) {
+        const realmFill = theme.prop(chain, "fill") ?? wordTint(keyOf2(e));
+        layers.realms.push(el("g", { id: anchor }, titleEl, el("polygon", { points: pointsAttr(poly), fill: realmFill, opacity: 0.2 })));
+        realmInfos.push({ e, key: keyOf2(e), poly, spans: [], fill: realmFill, frame: true });
+      } else {
+        layers.water.unshift(el("g", { id: anchor }, titleEl, el("polygon", { points: pointsAttr(poly), fill: wordFill })));
+      }
       if (e.name && !e.flags.includes("nolabel") && !overridden(e) && labelsOn(model)) {
-        const c = centroid(poly);
-        const keyedLbl = model.labelsMode === "keyed" ? labelTextFor(model, e) : null;
-        const labelText = keyedLbl ?? e.name.toUpperCase();
-        const y = placer.place(c.x, c.y, labelText, 18, "middle", labelText.length * (18 * 0.58 + 6));
-        layers.labels.push(
-          text(labelText, {
-            x: c.x,
-            y,
-            "font-size": 18,
-            "letter-spacing": 6,
-            fill: isWater ? "#5a7a96" : INK,
-            opacity: 0.55,
-            "text-anchor": "middle",
-            "font-family": "sans-serif"
-          })
-        );
+        deferLabel(4, () => {
+          const c = centroid(poly);
+          const keyedLbl = model.labelsMode === "keyed" ? labelTextFor(model, e) : null;
+          const labelText = keyedLbl ?? e.name.toUpperCase();
+          const width = labelText.length * (18 * 0.58 + 6);
+          const bw = Math.max(...poly.map((pt) => pt.x)) - Math.min(...poly.map((pt) => pt.x));
+          const spot = placer.placeOrDrop(c.x, c.y, labelText, 18, "middle", [0, -bw / 6, bw / 6, -bw / 4, bw / 4], width, (x, y) => pip({ x, y }, poly)) ?? { x: c.x, y: placer.place(c.x, c.y, labelText, 18, "middle", width), size: 18 };
+          labelBuckets[4].push(
+            text(labelText, {
+              x: spot.x,
+              y: spot.y,
+              "font-size": spot.size,
+              "letter-spacing": 6,
+              fill: isWater ? "#5a7a96" : INK,
+              opacity: 0.55,
+              "text-anchor": "middle",
+              "font-family": "sans-serif"
+            })
+          );
+        });
       }
       continue;
     }
     if (r.polygon) {
+      if (e.section === "water" || chain.some((word) => word === "sea" || word === "lake" || word === "water")) {
+        const isLake = chain.includes("lake");
+        const waterFill = theme.terrainFill(isLake ? ["lake"] : ["sea"]);
+        const shore = r.polygon;
+        (isLake ? layers.areas : layers.water).push(
+          el(
+            "g",
+            { id: anchor },
+            titleEl,
+            el("polygon", { points: pointsAttr(shore), fill: waterFill, stroke: isLake ? shade(waterFill) : void 0, "stroke-width": isLake ? 1.2 : void 0, "stroke-linejoin": "round" })
+          )
+        );
+        if (e.name && !e.flags.includes("nolabel") && !overridden(e) && labelsOn(model)) {
+          const priority = isLake ? 3 : 4;
+          deferLabel(priority, () => {
+            const c = centroid(r.polygon);
+            const keyedLbl = model.labelsMode === "keyed" ? labelTextFor(model, e) : null;
+            const labelText = keyedLbl ?? e.name.toUpperCase();
+            const bboxW = Math.max(...r.polygon.map((p) => p.x)) - Math.min(...r.polygon.map((p) => p.x));
+            const { size: size2, spacing } = fitLabel(labelText, bboxW * 0.85, isLake ? 10 : 14, isLake ? 2 : 4);
+            const width = labelText.length * (size2 * 0.58 + spacing);
+            const cx = Math.min(Math.max(c.x, width / 2 + 10), w - width / 2 - 10);
+            const y = placer.place(cx, c.y, labelText, size2, "middle", width);
+            labelBuckets[priority].push(
+              text(labelText, {
+                x: cx,
+                y,
+                "font-size": size2,
+                "letter-spacing": spacing,
+                fill: "#5a7a96",
+                opacity: 0.6,
+                "text-anchor": "middle",
+                "font-family": "sans-serif"
+              })
+            );
+          });
+        }
+        continue;
+      }
+      if (e.archetype === "zone") {
+        const realmFill = theme.prop(chain, "fill") ?? wordTint(keyOf2(e));
+        layers.realms.push(
+          el(
+            "g",
+            { id: anchor },
+            titleEl,
+            el("polygon", { points: pointsAttr(r.polygon), fill: realmFill, opacity: 0.2 })
+          )
+        );
+        realmInfos.push({ e, key: keyOf2(e), poly: r.polygon, spans: r.alongSpans ?? [], fill: realmFill });
+        if (e.name && !e.flags.includes("nolabel") && !overridden(e) && labelsOn(model)) {
+          deferLabel(4, () => {
+            const c = centroid(r.polygon);
+            const keyedLbl = model.labelsMode === "keyed" ? labelTextFor(model, e) : null;
+            const labelText = keyedLbl ?? e.name.toUpperCase();
+            const bboxW = Math.max(...r.polygon.map((p) => p.x)) - Math.min(...r.polygon.map((p) => p.x));
+            const { size: size2, spacing } = fitLabel(labelText, bboxW * 0.8, 15, 5);
+            const width = labelText.length * (size2 * 0.58 + spacing);
+            const dxs = [0, -bboxW / 5, bboxW / 5, -bboxW / 3, bboxW / 3];
+            const spot = placer.placeOrDrop(c.x, c.y, labelText, size2, "middle", dxs, width, (x, y) => pip({ x, y }, r.polygon)) ?? { x: c.x, y: placer.place(c.x, c.y, labelText, size2, "middle", width), size: size2 };
+            labelBuckets[4].push(
+              text(labelText, {
+                x: spot.x,
+                y: spot.y,
+                "font-size": spot.size,
+                "letter-spacing": spacing,
+                fill: "#6b5d4a",
+                opacity: 0.6,
+                "text-anchor": "middle",
+                "font-family": "sans-serif"
+              })
+            );
+          });
+        }
+        continue;
+      }
+      if (chain.includes("mountains")) {
+        const poly = r.polygon;
+        const xs = poly.map((pt) => pt.x);
+        const ys = poly.map((pt) => pt.y);
+        const x0 = Math.min(...xs);
+        const y0 = Math.min(...ys);
+        const x1 = Math.max(...xs);
+        const y1 = Math.max(...ys);
+        const step = 24;
+        const peaks = [];
+        for (let gy = 0; y0 + gy * step * 0.85 <= y1; gy++) {
+          for (let gx = 0; x0 + gx * step <= x1; gx++) {
+            const px = x0 + (gx + gy % 2 * 0.5) * step;
+            const py = y0 + gy * step * 0.85;
+            if (!pip({ x: px, y: py }, poly)) continue;
+            const s = (gx + gy) % 3 === 0 ? 6.5 : 5;
+            peaks.push(`M${fmt(px - s)} ${fmt(py + s * 0.7)}L${fmt(px)} ${fmt(py - s)}L${fmt(px + s)} ${fmt(py + s * 0.7)}`);
+          }
+        }
+        massifs.push({ anchor, titleEl, poly, peaks: peaks.join(""), fill: wordFill });
+        if (e.name && !e.flags.includes("nolabel") && !overridden(e) && labelsOn(model)) {
+          deferLabel(3, () => {
+            const c = r.point ?? centroid(poly);
+            const lbl = labelTextFor(model, e) ?? e.name;
+            const bw = x1 - x0;
+            const spot = placer.placeOrDrop(c.x, c.y, lbl, 11, "middle", [0, -bw / 5, bw / 5]);
+            if (!spot) return;
+            labelBuckets[3].push(
+              text(lbl, { x: spot.x, y: spot.y, "font-size": spot.size, fill: ink, opacity: 0.8, "text-anchor": "middle", "font-style": "italic", "font-family": "sans-serif" })
+            );
+          });
+        }
+        continue;
+      }
+      if (chain.includes("island")) {
+        const coast = theme.pathStroke(["coastline"]);
+        layers.areas.push(
+          el(
+            "g",
+            { id: anchor },
+            titleEl,
+            el("polygon", { points: pointsAttr(r.polygon), fill: groundFill ?? theme.surface("paper", "fill", "#f9f5ea"), stroke: coast.stroke, "stroke-width": 1.2, "stroke-linejoin": "round" })
+          )
+        );
+        if (e.name && !e.flags.includes("nolabel") && !overridden(e) && labelsOn(model)) {
+          deferLabel(3, () => {
+            const c = r.point ?? centroid(r.polygon);
+            const lbl = labelTextFor(model, e) ?? e.name;
+            const bw = Math.max(...r.polygon.map((p) => p.x)) - Math.min(...r.polygon.map((p) => p.x));
+            const spot = placer.placeOrDrop(c.x, c.y, lbl, 10, "middle", [0, -bw / 5, bw / 5]);
+            if (!spot) return;
+            labelBuckets[3].push(
+              text(lbl, { x: spot.x, y: spot.y, "font-size": spot.size, fill: ink, opacity: 0.8, "font-weight": model.labelsMode === "keyed" ? "bold" : void 0, "text-anchor": "middle", "font-style": "italic", "font-family": "sans-serif" })
+            );
+          });
+        }
+        continue;
+      }
       const areaParts = [titleEl];
-      const edgeFill = theme.prop(chain, "fill", { zone: "edge" });
+      const edgeFill = r.alongSpans?.length ? void 0 : theme.prop(chain, "fill", { zone: "edge" });
       if (edgeFill) {
         const edgeW = theme.edgeWidth(chain) ?? 4;
         areaParts.push(el("polygon", { points: pointsAttr(r.polygon), fill: edgeFill, stroke: shade(edgeFill), "stroke-width": 1 }));
         areaParts.push(el("polygon", { points: pointsAttr(shrinkPolygon(r.polygon, edgeW * 2)), fill: wordFill }));
+      } else if (r.alongSpans?.length) {
+        areaParts.push(el("polygon", { points: pointsAttr(r.polygon), fill: wordFill }));
       } else {
         areaParts.push(el("polygon", { points: pointsAttr(r.polygon), fill: wordFill, stroke: shade(wordFill), "stroke-width": 1 }));
       }
@@ -3356,64 +3957,216 @@ function renderRegion(model, body, size) {
       }
       layers.areas.push(el("g", { id: anchor }, ...areaParts));
       if (e.name && !e.flags.includes("nolabel") && !overridden(e) && labelsOn(model)) {
-        const c = r.point ?? centroid(r.polygon);
-        const lbl = labelTextFor(model, e) ?? e.name;
-        const y = placer.place(c.x, c.y, lbl, 11, "middle");
-        layers.labels.push(
-          text(lbl, { x: c.x, y, "font-size": 11, fill: ink, opacity: 0.8, "font-weight": model.labelsMode === "keyed" ? "bold" : void 0, "text-anchor": "middle", "font-style": "italic", "font-family": "sans-serif" })
-        );
+        deferLabel(3, () => {
+          const c = r.point ?? centroid(r.polygon);
+          const lbl = labelTextFor(model, e) ?? e.name;
+          const bw = Math.max(...r.polygon.map((p) => p.x)) - Math.min(...r.polygon.map((p) => p.x));
+          const size2 = Math.min(18, Math.max(11, Math.round(bw / 16)));
+          const spot = placer.placeOrDrop(c.x, c.y, lbl, size2, "middle", [0, -bw / 5, bw / 5, -bw / 3, bw / 3]);
+          if (!spot) return;
+          labelBuckets[3].push(
+            text(lbl, { x: spot.x, y: spot.y, "font-size": spot.size, fill: ink, opacity: 0.8, "font-weight": model.labelsMode === "keyed" ? "bold" : void 0, "text-anchor": "middle", "font-style": "italic", "font-family": "sans-serif" })
+          );
+        });
       }
       continue;
     }
     if (r.polyline) {
       if (r.ridge) {
-        layers.lines.push(
-          el(
-            "g",
-            { id: anchor },
-            titleEl,
-            el("polyline", { points: pointsAttr(r.polyline), fill: "none", stroke: "#a99a85", "stroke-width": 14, opacity: 0.5, "stroke-linejoin": "round", "stroke-linecap": "round" }),
-            el("polyline", { points: pointsAttr(r.polyline), fill: "none", stroke: "#8d8171", "stroke-width": 2.5, "stroke-linejoin": "round" })
-          )
-        );
+        const beltW = r.beltW ?? 28;
+        const lp = r.polyline;
+        const cum = [0];
+        for (let i = 1; i < lp.length; i++) cum.push(cum[i - 1] + Math.hypot(lp[i].x - lp[i - 1].x, lp[i].y - lp[i - 1].y));
+        const total = cum[cum.length - 1] || 1;
+        const phase = hashString(entityAnchor(e) ?? e.name ?? "ridge") % 628 / 100;
+        const wAt = (t) => {
+          const taper = Math.pow(Math.max(0, Math.sin(Math.PI * t)), 0.6);
+          const wobble = 1 + 0.18 * Math.sin(4.3 * Math.PI * t + phase);
+          return beltW * (0.18 + 0.82 * taper) * wobble;
+        };
+        const leftSide = [];
+        const rightSide = [];
+        for (let i = 0; i < lp.length; i++) {
+          const prev = lp[Math.max(0, i - 1)];
+          const next = lp[Math.min(lp.length - 1, i + 1)];
+          const dx = next.x - prev.x;
+          const dy = next.y - prev.y;
+          const len = Math.hypot(dx, dy) || 1;
+          const hw = wAt(cum[i] / total) / 2;
+          leftSide.push({ x: lp[i].x + dy / len * hw, y: lp[i].y - dx / len * hw });
+          rightSide.push({ x: lp[i].x - dy / len * hw, y: lp[i].y + dx / len * hw });
+        }
+        const beltPoly = [lp[0], ...leftSide, lp[lp.length - 1], ...[...rightSide].reverse()];
+        const count = Math.max(2, Math.floor(total / Math.max(14, beltW * 0.55)));
+        const peaks = [];
+        for (let i = 0; i <= count; i++) {
+          const t = i / count;
+          const wLoc = wAt(t);
+          const s = wLoc * (i % 3 === 1 ? 0.2 : 0.26);
+          if (s < 2.5) continue;
+          const { p, dir } = alongAt(lp, t);
+          const side = i % 2 === 0 ? 1 : -1;
+          const offAmt = (i % 3 === 0 ? 0 : wLoc * 0.18) * side;
+          const px = p.x + dir.y * offAmt;
+          const py = p.y - dir.x * offAmt;
+          peaks.push(`M${fmt(px - s)} ${fmt(py + s * 0.7)}L${fmt(px)} ${fmt(py - s)}L${fmt(px + s)} ${fmt(py + s * 0.7)}`);
+        }
+        massifs.push({ anchor, titleEl, poly: beltPoly, peaks: peaks.join(""), fill: wordFill });
       } else {
-        const stroke = theme.pathStroke(chain);
-        const width = Number(pairOf(e.pairs, "width") ?? 2);
-        const lineParts = [titleEl];
-        const edgeW = theme.edgeWidth(chain);
-        if (edgeW) {
-          const edgeStroke = theme.prop(chain, "stroke", { zone: "edge" }) ?? theme.prop(chain, "fill", { zone: "edge" }) ?? stroke.stroke;
+        const frontier = frontierFills.get(keyOf2(e));
+        if (frontier) {
+          layers.lines.push(
+            el(
+              "g",
+              { id: anchor },
+              titleEl,
+              el("polyline", { points: pointsAttr(r.polyline), fill: "none", stroke: shade(frontier.fill), "stroke-width": 1.7, "stroke-dasharray": "0.2 6", opacity: 0.9, "stroke-linejoin": "round", "stroke-linecap": "round" })
+            )
+          );
+        } else {
+          const stroke = theme.pathStroke(chain);
+          const width = Number(pairOf(e.pairs, "width") ?? (chain.includes("coastline") ? 1.2 : 2));
+          const lineParts = [titleEl];
+          const edgeW = theme.edgeWidth(chain);
+          if (edgeW) {
+            const edgeStroke = theme.prop(chain, "stroke", { zone: "edge" }) ?? theme.prop(chain, "fill", { zone: "edge" }) ?? stroke.stroke;
+            lineParts.push(
+              el("polyline", {
+                points: pointsAttr(r.polyline),
+                fill: "none",
+                stroke: edgeStroke,
+                "stroke-width": width + 2 * edgeW,
+                "stroke-linejoin": "round",
+                "stroke-linecap": "round"
+              })
+            );
+          }
           lineParts.push(
             el("polyline", {
               points: pointsAttr(r.polyline),
               fill: "none",
-              stroke: edgeStroke,
-              "stroke-width": width + 2 * edgeW,
+              stroke: stroke.stroke,
+              "stroke-width": width,
+              "stroke-dasharray": stroke.dash,
               "stroke-linejoin": "round",
               "stroke-linecap": "round"
             })
           );
+          layers.lines.push(el("g", { id: anchor }, ...lineParts));
         }
-        lineParts.push(
-          el("polyline", {
-            points: pointsAttr(r.polyline),
-            fill: "none",
-            stroke: stroke.stroke,
-            "stroke-width": width,
-            "stroke-dasharray": stroke.dash,
-            "stroke-linejoin": "round",
-            "stroke-linecap": "round"
-          })
-        );
-        layers.lines.push(el("g", { id: anchor }, ...lineParts));
       }
       if (e.name && !e.flags.includes("nolabel") && !overridden(e) && labelsOn(model)) {
-        const mid = r.polyline[Math.floor(r.polyline.length / 2)];
-        const lbl = labelTextFor(model, e) ?? e.name;
-        const y = placer.place(mid.x + 4, mid.y - 4, lbl, 10, "start");
-        layers.labels.push(
-          text(lbl, { x: mid.x + 4, y, "font-size": 10, fill: ink, opacity: 0.75, "font-weight": model.labelsMode === "keyed" ? "bold" : void 0, "font-style": "italic", "font-family": "sans-serif" })
-        );
+        deferLabel(2, () => {
+          const lbl = labelTextFor(model, e) ?? e.name;
+          const isRidge = !!r.ridge;
+          const ownBelt = isRidge ? beltObstacles.get(keyOf2(e)) ?? [] : [];
+          for (const o of ownBelt) placer.release(o.handle);
+          try {
+            let lp = r.polyline;
+            if (lp[0].x > lp[lp.length - 1].x) lp = [...lp].reverse();
+            let pathLen = 0;
+            for (let i = 0; i < lp.length - 1; i++) pathLen += Math.hypot(lp[i + 1].x - lp[i].x, lp[i + 1].y - lp[i].y);
+            const bendOf = (offset, halfFrac, above) => {
+              const ts = [-1, -0.5, 0, 0.5, 1].map((f) => Math.min(1, Math.max(0, offset + f * halfFrac)));
+              const angs = ts.map((t) => {
+                const d2 = alongAt(lp, t).dir;
+                return Math.atan2(d2.y, d2.x);
+              });
+              let sum = 0;
+              let signed = 0;
+              for (let i = 1; i < angs.length; i++) {
+                let dA = angs[i] - angs[i - 1];
+                while (dA > Math.PI) dA -= 2 * Math.PI;
+                while (dA < -Math.PI) dA += 2 * Math.PI;
+                sum += Math.abs(dA);
+                signed += dA;
+              }
+              const inside = !isRidge && (above && signed < 0 || !above && signed > 0);
+              return sum * 80 + (inside ? Math.abs(signed) * 120 : 0);
+            };
+            const candidatesAt = (size2) => {
+              const wpx = lbl.length * size2 * 0.58;
+              const halfFrac = Math.min(0.45, wpx / 2 / Math.max(pathLen, 1));
+              const slots = [0.5, 0.32, 0.68, 0.18, 0.82, 0.08, 0.92].map((s) => Math.min(1 - halfFrac, Math.max(halfFrac, s))).filter((s, i, arr) => arr.indexOf(s) === i);
+              const out = [];
+              const off = isRidge ? 0 : 9.5;
+              const n = Math.max(3, Math.ceil(wpx / 12));
+              for (const offset of slots) {
+                for (const above of isRidge ? [true] : [true, false]) {
+                  const boxAt = (t) => {
+                    const { p, dir } = alongAt(lp, t);
+                    const s = above ? 1 : -1;
+                    return { cx: p.x + dir.y * off * s, top: p.y - dir.x * off * s - 4.5 };
+                  };
+                  const boxes = [];
+                  for (let i = 0; i < n; i++) {
+                    const t = offset - halfFrac + (i + 0.5) / n * 2 * halfFrac;
+                    boxes.push(boxAt(Math.min(1, Math.max(0, t))));
+                  }
+                  out.push({ offset, above, size: size2, wpx, boxes, penalty: bendOf(offset, halfFrac, above) });
+                }
+              }
+              return out;
+            };
+            const costOf = (c) => c.boxes.reduce((sum, b) => sum + placer.boxCost(b.cx, b.top, c.wpx / c.boxes.length, 9), 0);
+            let pick = null;
+            for (let size2 = 10; size2 >= 8 && !pick; size2--) {
+              let best = null;
+              for (const c of candidatesAt(size2)) {
+                if (costOf(c) !== 0) continue;
+                if (!best || c.penalty < best.penalty) best = c;
+              }
+              pick = best;
+            }
+            if (!pick) {
+              const leastBad = (size2) => {
+                const finalists = candidatesAt(size2);
+                let best = finalists[0];
+                let bestScore = Infinity;
+                finalists.forEach((c, i) => {
+                  const score = costOf(c) + c.penalty + i * size2;
+                  if (score < bestScore) {
+                    bestScore = score;
+                    best = c;
+                  }
+                });
+                return { c: best, score: bestScore };
+              };
+              for (let size2 = 10; size2 >= 8 && !pick; size2--) {
+                const b = leastBad(size2);
+                if (b.score <= b.c.wpx * 9 * 0.12) pick = b.c;
+              }
+              if (!pick) {
+                const b = leastBad(8);
+                if (b.score > b.c.wpx * 9 * 0.5) return;
+                pick = b.c;
+              }
+            }
+            if (pick.penalty >= 60) {
+              const midp = alongAt(lp, 0.5).p;
+              const spot = isRidge ? placer.placeOrDrop(midp.x, midp.y + 3, lbl, 10, "middle", [0, -24, 24], void 0, (x, y) => {
+                const q = nearestOnPolyline(lp, { x, y });
+                return Math.hypot(q.x - x, q.y - y) <= (r.beltW ?? 28) / 2;
+              }) : placer.placeOrDrop(midp.x, midp.y - 14, lbl, 10, "middle");
+              if (spot) {
+                labelBuckets[2].push(
+                  text(lbl, { x: spot.x, y: spot.y, "font-size": spot.size, fill: ink, opacity: isRidge ? 0.9 : 0.75, "font-weight": model.labelsMode === "keyed" ? "bold" : void 0, "text-anchor": "middle", "font-style": "italic", "font-family": "sans-serif" })
+                );
+                return;
+              }
+            }
+            for (const b of pick.boxes) placer.claimBox(b.cx, b.top, pick.wpx / pick.boxes.length, 9);
+            const pid = `cdlp-${model.doc.docId}-${pathLabelCount++}`;
+            const d = `M${fmt(lp[0].x)} ${fmt(lp[0].y)}` + lp.slice(1).map((pt) => `L${fmt(pt.x)} ${fmt(pt.y)}`).join("");
+            const safe = lbl.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+            const weight = model.labelsMode === "keyed" ? ' font-weight="bold"' : "";
+            labelBuckets[2].push(
+              `<path id="${pid}" d="${d}" fill="none"/><text font-size="${pick.size}" fill="${ink}" opacity="${isRidge ? 0.9 : 0.75}" font-style="italic"${weight} text-anchor="middle" font-family="sans-serif"><textPath href="#${pid}" startOffset="${fmt(pick.offset * 100)}%"><tspan dy="${fmt(isRidge ? 3.5 : pick.above ? -5 : 12)}">${safe}</tspan></textPath></text>`
+            );
+          } finally {
+            for (const o of ownBelt) o.handle = placer.tempBlock(o.spec[0], o.spec[1], o.spec[2], o.spec[3], 0.3);
+          }
+        });
       }
       continue;
     }
@@ -3437,10 +4190,165 @@ function renderRegion(model, body, size) {
       );
       const label = (e.name !== null ? labelTextFor(model, e) ?? e.name : null) ?? (e.typeWord === "note" ? e.texts[0] ?? null : null) ?? (hasTierGlyph(chain) ? null : e.typeWord);
       if (label && !e.flags.includes("nolabel") && !overridden(e) && labelsOn(model, e)) {
-        const spot = placer.placeBeside(r.point.x + tier.r + 3, r.point.x - tier.r - 3, r.point.y + 4, label, tier.font);
-        layers.labels.push(
-          text(label, { x: spot.x, y: spot.y, "font-size": tier.font, "font-weight": tier.weight, fill: ink, "text-anchor": spot.anchor === "middle" ? void 0 : spot.anchor, "font-family": "sans-serif" })
-        );
+        const pt = r.point;
+        deferLabel(1 + (24 - tier.font) / 100, () => {
+          const spot = placer.placeBesideOrDrop(pt.x + tier.r + 3, pt.x - tier.r - 3, pt.y + 4, label, tier.font);
+          if (!spot) return;
+          labelBuckets[1].push(
+            // text-anchor is ALWAYS written: SVG's default is start, so an
+            // omitted "middle" renders shifted right (the clipped Deepwatch).
+            text(label, { x: spot.x, y: spot.y, "font-size": spot.size, "font-weight": tier.weight, fill: ink, "text-anchor": spot.anchor, "font-family": "sans-serif" })
+          );
+        });
+      }
+    }
+  }
+  if (massifs.length) {
+    const groups = [];
+    for (const fill of [...new Set(massifs.map((m) => m.fill))]) {
+      const mine = massifs.filter((m) => m.fill === fill);
+      groups.push(
+        el(
+          "g",
+          { opacity: 0.55 },
+          ...mine.map((m) => el("g", { id: m.anchor }, m.titleEl, el("polygon", { points: pointsAttr(m.poly), fill })))
+        )
+      );
+      groups.push(
+        el("path", { d: mine.map((m) => m.peaks).join(""), fill: "none", stroke: shade(fill), "stroke-width": 1.4, opacity: 0.8, "stroke-linejoin": "round", "stroke-linecap": "round" })
+      );
+    }
+    layers.lines.unshift(...groups);
+  }
+  if (realmInfos.length) {
+    const distToBoundary = (pt, poly) => {
+      let best = Infinity;
+      for (let i = 0; i < poly.length; i++) {
+        const a = poly[i];
+        const b = poly[(i + 1) % poly.length];
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const lenSq = dx * dx + dy * dy || 1;
+        const t = Math.max(0, Math.min(1, ((pt.x - a.x) * dx + (pt.y - a.y) * dy) / lenSq));
+        best = Math.min(best, Math.hypot(a.x + t * dx - pt.x, a.y + t * dy - pt.y));
+      }
+      return best;
+    };
+    const SECTOR_OF = {
+      n: 0,
+      north: 0,
+      ne: 1,
+      northeast: 1,
+      e: 2,
+      east: 2,
+      se: 3,
+      southeast: 3,
+      s: 4,
+      south: 4,
+      sw: 5,
+      southwest: 5,
+      w: 6,
+      west: 6,
+      nw: 7,
+      northwest: 7
+    };
+    const edgeInfos = /* @__PURE__ */ new Map();
+    for (const info of realmInfos) {
+      const poly = info.poly;
+      const edges = [];
+      for (let i = 0; i < poly.length; i++) {
+        const a = poly[i];
+        const b = poly[(i + 1) % poly.length];
+        const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        let nrm = { x: (b.y - a.y) / len, y: -(b.x - a.x) / len };
+        if (pip({ x: mid.x + nrm.x * 1.5, y: mid.y + nrm.y * 1.5 }, poly)) nrm = { x: -nrm.x, y: -nrm.y };
+        let open = true;
+        for (let t = 4; t <= 400; t += 4) {
+          if (pip({ x: mid.x + nrm.x * t, y: mid.y + nrm.y * t }, poly)) {
+            open = false;
+            break;
+          }
+        }
+        const deg = (Math.atan2(nrm.x, -nrm.y) * 180 / Math.PI + 360) % 360;
+        const sector = Math.floor((deg + 22.5) % 360 / 45);
+        const abuts = /* @__PURE__ */ new Set();
+        for (const other of realmInfos) {
+          if (other.key !== info.key && distToBoundary(mid, other.poly) < 2.5) abuts.add(other.key);
+        }
+        edges.push({ mid, nrm, sector, open, abuts });
+      }
+      edgeInfos.set(info.key, edges);
+    }
+    const stateOf = /* @__PURE__ */ new Map();
+    for (const info of realmInfos) stateOf.set(info.key, new Array(info.poly.length).fill(null));
+    const realmByWord = new Map(realmInfos.map((info) => [info.key, info]));
+    const parsed = borderDecls.map((decl) => {
+      const realms = decl.flags.filter((word) => realmByWord.has(word));
+      const compass = decl.flags.filter((word) => SECTOR_OF[word] !== void 0);
+      const inner = decl.flags.includes("inner");
+      const alongRefs = decl.placements.filter((p) => p.kind === "relational" && p.form === "along").map((p) => p.ref.value);
+      const state = decl.flags.find((word) => !realmByWord.has(word) && SECTOR_OF[word] === void 0 && word !== "inner") ?? "border";
+      const specificity = alongRefs.length ? 3 : compass.length ? 2 : realms.length >= 2 ? 1 : 0;
+      return { decl, realms, compass, inner, alongRefs, state, specificity };
+    });
+    parsed.sort((a, b) => a.specificity - b.specificity);
+    for (const d of parsed) {
+      const apply = (realmKey, pick) => {
+        const edges = edgeInfos.get(realmKey);
+        const states = stateOf.get(realmKey);
+        if (!edges || !states) return;
+        edges.forEach((edge, idx) => {
+          if (pick(edge, idx)) states[idx] = { state: d.state, decl: d.decl };
+        });
+      };
+      if (d.realms.length >= 2) {
+        const [a, b] = [d.realms[0], d.realms[1]];
+        apply(a, (edge) => edge.abuts.has(b));
+        apply(b, (edge) => edge.abuts.has(a));
+      } else if (d.realms.length === 1) {
+        const key = d.realms[0];
+        if (d.alongRefs.length) {
+          const spans = realmByWord.get(key)?.spans ?? [];
+          apply(key, (_edge, idx) => spans.some((s) => d.alongRefs.includes(s.ref) && idx >= s.start && idx < s.end));
+        } else if (d.compass.length) {
+          const sectors = new Set(d.compass.map((word) => SECTOR_OF[word]));
+          apply(key, (edge) => sectors.has(edge.sector) && (d.inner ? !edge.open : edge.open));
+        } else {
+          apply(key, (edge) => edge.abuts.size === 0);
+        }
+      }
+    }
+    for (const info of realmInfos) {
+      const states = stateOf.get(info.key);
+      const poly = info.poly;
+      const n = poly.length;
+      let i = 0;
+      while (i < n) {
+        const current = states[i];
+        let j = i;
+        while (j + 1 < n && states[j + 1]?.state === current?.state && states[j + 1]?.decl === current?.decl) j++;
+        const pts = poly.slice(i, j + 2 > n ? n : j + 2);
+        if (j + 2 > n) pts.push(poly[0]);
+        if (current) {
+          const stateFill = theme.terrainFill([current.state]);
+          const stroke = shade(stateFill);
+          const title = gmTitleFor(model, current.decl);
+          layers.lines.push(
+            el(
+              "g",
+              {},
+              title ? el("title", {}, title) : "",
+              el("polyline", { points: pointsAttr(pts), fill: "none", stroke: stateFill, "stroke-width": 7, opacity: 0.25, "stroke-linejoin": "round", "stroke-linecap": "round" }),
+              el("polyline", { points: pointsAttr(pts), fill: "none", stroke, "stroke-width": 1.6, "stroke-dasharray": "9 4 2 4", opacity: 0.9, "stroke-linejoin": "round", "stroke-linecap": "round" })
+            )
+          );
+        } else if (!info.frame) {
+          layers.realms.push(
+            el("polyline", { points: pointsAttr(pts), fill: "none", stroke: shade(info.fill), "stroke-width": 1.2, "stroke-dasharray": "9 4 2 4", "stroke-opacity": 0.55, "stroke-linejoin": "round" })
+          );
+        }
+        i = j + 1;
       }
     }
   }
@@ -3452,31 +4360,112 @@ function renderRegion(model, body, size) {
       const b = toXY(o.hint.range.to);
       const cx = (a.x + b.x) / 2;
       const cy = (a.y + b.y) / 2;
-      layers.labels.push(
-        text(name.toUpperCase(), {
-          x: cx,
-          y: cy,
-          "font-size": 16,
-          "letter-spacing": 8,
+      const spanLen = Math.max(Math.hypot(b.x - a.x, b.y - a.y), 40);
+      const upper = name.toUpperCase();
+      const vertical = Math.abs(b.y - a.y) > Math.abs(b.x - a.x);
+      deferLabel(0, () => {
+        const sprawlText = (tx, ty, size3, spacing2) => text(upper, {
+          x: tx,
+          y: ty,
+          "font-size": size3,
+          "letter-spacing": spacing2,
           fill: "#5a7a96",
           opacity: 0.85,
           "text-anchor": "middle",
           "font-family": "sans-serif",
-          transform: Math.abs(b.y - a.y) > Math.abs(b.x - a.x) ? `rotate(90 ${fmt(cx)} ${fmt(cy)})` : void 0
-        })
-      );
+          transform: vertical ? `rotate(90 ${fmt(tx)} ${fmt(ty)})` : void 0
+        });
+        const s0 = vertical ? Math.min(a.y, b.y) : Math.min(a.x, b.x);
+        const s1 = vertical ? Math.max(a.y, b.y) : Math.max(a.x, b.x);
+        const cross = vertical ? cx : cy;
+        let occ0 = Infinity;
+        let occ1 = -Infinity;
+        for (const it of items) {
+          if (it.e.section === "water" || it.e.archetype === "zone") continue;
+          const consider = (lo, hi, cLo, cHi) => {
+            if (cHi < cross - 16 || cLo > cross + 16) return;
+            occ0 = Math.min(occ0, lo);
+            occ1 = Math.max(occ1, hi);
+          };
+          if (it.r.polygon) {
+            const xs = it.r.polygon.map((p) => p.x);
+            const ys = it.r.polygon.map((p) => p.y);
+            if (vertical) consider(Math.min(...ys), Math.max(...ys), Math.min(...xs), Math.max(...xs));
+            else consider(Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys));
+          } else if (it.r.point) {
+            const p = it.r.point;
+            if (vertical) consider(p.y - 6, p.y + 6, p.x - 6, p.x + 6);
+            else consider(p.x - 6, p.x + 6, p.y - 6, p.y + 6);
+          }
+        }
+        occ0 = Math.max(s0, occ0 - 10);
+        occ1 = Math.min(s1, occ1 + 10);
+        const targetPoly = resolved.get(key)?.polygon;
+        let e0 = s0;
+        let e1 = s1;
+        if (targetPoly) {
+          const vals = targetPoly.map((p) => vertical ? p.y : p.x);
+          e0 = Math.min(e0, Math.max(12, Math.min(...vals)));
+          e1 = Math.max(e1, Math.min((vertical ? h : w) - 12, Math.max(...vals)));
+        }
+        const stretches = [];
+        if (occ0 <= occ1 && spanLen >= 200) {
+          for (const st of [{ lo: e0, hi: occ0 }, { lo: occ1, hi: e1 }]) {
+            if (st.hi - st.lo >= 60) stretches.push(st);
+          }
+        }
+        if (stretches.length) {
+          const fitLen = Math.min(...stretches.map((st) => st.hi - st.lo)) * 0.6;
+          const { size: size3, spacing: spacing2 } = fitLabel(upper, fitLen, 16, 8);
+          const halfL = upper.length * (size3 * 0.58 + spacing2) / 2 + 3;
+          for (const st of stretches) {
+            const m = (st.lo + st.hi) / 2;
+            const tx = vertical ? cx : m;
+            const ty = vertical ? m : cy;
+            if (vertical) placer.block(tx - size3, ty - halfL, size3 * 2, halfL * 2, 3);
+            else placer.block(tx - halfL, ty - size3, halfL * 2, size3 * 2, 3);
+            labelBuckets[0].push(sprawlText(tx, ty, size3, spacing2));
+          }
+          return;
+        }
+        const { size: size2, spacing } = fitLabel(upper, spanLen, 16, 8);
+        if (vertical) placer.block(cx - size2, cy - spanLen / 2, size2 * 2, spanLen, 3);
+        else placer.block(cx - spanLen / 2, cy - size2, spanLen, size2 * 2, 3);
+        labelBuckets[0].push(sprawlText(cx, cy, size2, spacing));
+      });
     } else if (o.hint.kind === "at" && o.hint.target.kind === "point") {
       const p = toXY(o.hint.target);
-      layers.labels.push(text(name, { x: p.x, y: p.y, "font-size": 11, fill: ink, "text-anchor": "middle", "font-family": "sans-serif" }));
+      deferLabel(0, () => {
+        placer.block(p.x - name.length * 3.2, p.y - 10, name.length * 6.4, 14, 3);
+        labelBuckets[0].push(text(name, { x: p.x, y: p.y, "font-size": 11, fill: ink, "text-anchor": "middle", "font-family": "sans-serif" }));
+      });
     } else if (o.hint.kind === "side") {
       const base = resolved.get(key)?.point;
       if (base) {
         const vec = COMPASS_VECTORS[o.hint.compass];
-        layers.labels.push(text(name, { x: base.x + vec.x * 16, y: base.y + vec.y * 16, "font-size": 11, fill: ink, "text-anchor": "middle", "font-family": "sans-serif" }));
+        const lx = base.x + vec.x * 16;
+        const ly = base.y + vec.y * 16;
+        deferLabel(0, () => {
+          placer.block(lx - name.length * 3.2, ly - 10, name.length * 6.4, 14, 3);
+          labelBuckets[0].push(text(name, { x: lx, y: ly, "font-size": 11, fill: ink, "text-anchor": "middle", "font-family": "sans-serif" }));
+        });
       }
     }
   }
-  body.push(...layers.areas, ...layers.lines, ...layers.points, ...layers.labels);
+  labelJobs.sort((a, b) => a.priority - b.priority);
+  for (const job of labelJobs) job.run();
+  layers.labels.push(...labelBuckets[4], ...labelBuckets[3], ...labelBuckets[2], ...labelBuckets[1], ...labelBuckets[0]);
+  body.push(...layers.water, ...layers.realms, ...layers.areas, ...layers.lines, ...layers.points, ...layers.labels);
+}
+function fitLabel(textStr, maxPx, baseSize, baseSpacing) {
+  const perChar = maxPx / textStr.length;
+  for (let size = baseSize; size > 8; size--) {
+    const natural = baseSpacing * size / baseSize;
+    if (textStr.length * (size * 0.58 + natural) <= maxPx) return { size, spacing: natural };
+    const needed = perChar - size * 0.58;
+    if (needed >= 0.5) return { size, spacing: needed };
+  }
+  return { size: 8, spacing: Math.max(0.5, perChar - 8 * 0.58) };
 }
 function halfPlanePolygon(hp, w, h) {
   const line = hp.of;
@@ -3485,10 +4474,16 @@ function halfPlanePolygon(hp, w, h) {
   const c = hp.compass;
   if ((c.includes("n") || c.includes("s")) && !c.includes("e") && !c.includes("w")) {
     const edgeY = c.includes("n") ? 0 : h;
-    return [...line, { x: last.x, y: edgeY }, { x: first.x, y: edgeY }];
+    const ltr = first.x <= last.x;
+    const x0 = ltr ? 0 : w;
+    const x1 = ltr ? w : 0;
+    return [{ x: x0, y: first.y }, ...line, { x: x1, y: last.y }, { x: x1, y: edgeY }, { x: x0, y: edgeY }];
   }
   const edgeX = c.includes("w") ? 0 : w;
-  return [...line, { x: edgeX, y: last.y }, { x: edgeX, y: first.y }];
+  const ttb = first.y <= last.y;
+  const y0 = ttb ? 0 : h;
+  const y1 = ttb ? h : 0;
+  return [{ x: first.x, y: y0 }, ...line, { x: last.x, y: y1 }, { x: edgeX, y: y1 }, { x: edgeX, y: y0 }];
 }
 function centroid(pts) {
   let x = 0;
@@ -3596,7 +4591,7 @@ function render(doc, options = {}) {
     w = 820;
     h = unitsH * scale;
     body.push(el("rect", { x: 0, y: 0, width: w, height: h, fill: theme.surface("paper", "fill", PAPER) }));
-    renderRegion(model, body, { w, h, scale });
+    renderRegion(model, body, { w, h, scale }, diagnostics);
   }
   if (model.header.get("legend") === "on" || model.labelsMode === "keyed") {
     const legend = buildLegend(model, w);
