@@ -615,7 +615,7 @@ function inferArchetype(placements, section) {
 }
 
 // packages/core/src/parse.ts
-var SPEC_VERSION = "0.1";
+var SPEC_VERSION = "0.3";
 var MAP_TYPES = /* @__PURE__ */ new Set(["battlemap", "hexcrawl", "region"]);
 var KNOWN_HEADER_KEYS = /* @__PURE__ */ new Set([
   "map",
@@ -797,7 +797,7 @@ function parse(source, options = {}) {
     } else if (key === "grid") {
       document.grid = parseGrid(value, raw.line, diagnostics);
     } else if (key === "chartdown") {
-      if (value !== SPEC_VERSION) {
+      if (parseFloat(value) > parseFloat(SPEC_VERSION)) {
         diagnostics.push(warning(raw.line, `document targets spec ${value}; this parser implements ${SPEC_VERSION}`));
       }
     } else if (key === "use") {
