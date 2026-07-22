@@ -1,0 +1,51 @@
+# Builds the driver from the Chartdown monorepo (single source of truth),
+# commits dist/render.mjs here, and tags: the exact version plus the floating
+# v1 major tag marketplace users pin (`uses: Nossimonov/chartdown-action@v1`).
+name: Release action
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Chartdown monorepo ref to build (branch, tag, or SHA)
+        default: main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Nossimonov/Chartdown
+          ref: ${{ inputs.ref }}
+          path: chartdown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+        working-directory: chartdown
+      - run: npm run build
+        working-directory: chartdown
+      - run: npm test
+        working-directory: chartdown
+      - id: version
+        run: echo "version=$(node -p "JSON.parse(require('fs').readFileSync('./chartdown/packages/action/package.json','utf8').replace(/^﻿/,'')).version")" >> "$GITHUB_OUTPUT"
+      - name: Commit the built driver
+        run: |
+          mkdir -p dist
+          cp chartdown/packages/action/dist/render.mjs dist/render.mjs
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add dist
+          git diff --cached --quiet || git commit -m "Release ${{ steps.version.outputs.version }}"
+          git push
+      - name: Tag exact version and move the floating v1
+        run: |
+          V="v${{ steps.version.outputs.version }}"
+          git tag -f "$V"
+          git tag -f v1
+          git push -f origin "$V" v1

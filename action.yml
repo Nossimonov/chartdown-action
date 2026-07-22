@@ -1,0 +1,52 @@
+name: "Chartdown Render"
+description: "Render Chartdown maps — .cd files and ```chartdown fences in Markdown — to SVG in your repo, so your docs show maps natively"
+author: "Nossimonov"
+branding:
+  icon: "map"
+  color: "orange"
+
+inputs:
+  root:
+    description: "Directory to scan (recursively; node_modules/.git/dot-dirs skipped)"
+    default: "."
+  mode:
+    description: "player | gm | both — which view(s) to render (player is fail-closed: secrets stripped)"
+    default: "player"
+  markdown:
+    description: "Also render ```chartdown fences inside .md files (to <md-base>.<doc-id>.svg)"
+    default: "true"
+  theme:
+    description: "Path to a Chartdown theme document to apply"
+    default: ""
+  verify:
+    description: "Render and DIFF instead of writing — fail if committed SVGs drift from sources (CI guard mode; implies no commit)"
+    default: "false"
+  commit:
+    description: "Commit and push the rendered SVGs (needs `permissions: contents: write` on the job)"
+    default: "true"
+  commit-message:
+    description: "Commit message for rendered maps"
+    default: "Render Chartdown maps"
+
+runs:
+  using: composite
+  steps:
+    - name: Render
+      shell: bash
+      env:
+        INPUT_ROOT: ${{ inputs.root }}
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_MARKDOWN: ${{ inputs.markdown }}
+        INPUT_THEME: ${{ inputs.theme }}
+        INPUT_VERIFY: ${{ inputs.verify }}
+      run: node "${{ github.action_path }}/dist/render.mjs"
+    - name: Commit rendered maps
+      if: inputs.commit == 'true' && inputs.verify != 'true'
+      shell: bash
+      env:
+        MESSAGE: ${{ inputs.commit-message }}
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add -A -- "*.svg"
+        git diff --cached --quiet || { git commit -m "$MESSAGE"; git push; }
