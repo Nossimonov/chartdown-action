@@ -1519,12 +1519,48 @@ function buildModel(doc, mode, theme, diagnostics = []) {
   }
   const chainOf = (word) => word ? vocab.chain(word) : [];
   const facetOf = (word, key) => word ? vocab.facetOf(word, key) : void 0;
-  const labelsMode = header.get("labels") === "none" ? "none" : "names";
+  const labelsHeader = header.get("labels");
+  const labelsMode = labelsHeader === "none" ? "none" : labelsHeader === "keyed" ? "keyed" : "names";
   const resolvedNotes = /* @__PURE__ */ new Map();
   if (doc.mapType === "battlemap") {
     resolveRelativePlacements(entities, chainOf, resolvedNotes, diagnostics);
   }
-  return { doc, mode, entities, hexLines, labelOverrides, gmNotes, header, seed, theme, labelsMode, chainOf, facetOf, resolvedNotes };
+  const keys = labelsMode === "keyed" ? assignKeys(entities, hexLines, diagnostics) : /* @__PURE__ */ new Map();
+  return { doc, mode, entities, hexLines, labelOverrides, gmNotes, header, seed, theme, labelsMode, keys, chainOf, facetOf, resolvedNotes };
+}
+function assignKeys(entities, hexLines, diagnostics) {
+  const keys = /* @__PURE__ */ new Map();
+  const named = [];
+  const collect = (node) => {
+    if (!node.name || node.flags.includes("nolabel")) return;
+    const raw = pairOf(node.pairs, "key");
+    const pin = raw !== void 0 ? Number(raw) : null;
+    if (raw !== void 0 && (!Number.isInteger(pin) || pin < 1)) {
+      diagnostics.push({ severity: "error", line: node.line, message: `key=${raw} is not a positive integer (spec 07 \xA73)` });
+      return;
+    }
+    named.push({ node, pin, line: node.line });
+  };
+  for (const e of entities) collect(e);
+  for (const hex of hexLines) collect(hex);
+  const used = /* @__PURE__ */ new Set();
+  for (const n of named) {
+    if (n.pin === null) continue;
+    if (used.has(n.pin)) {
+      diagnostics.push({ severity: "error", line: n.line, message: `key=${n.pin} is pinned twice (spec 07 \xA73)` });
+      continue;
+    }
+    used.add(n.pin);
+    keys.set(n.node, n.pin);
+  }
+  let next = 1;
+  for (const n of named) {
+    if (keys.has(n.node)) continue;
+    while (used.has(next)) next++;
+    used.add(next);
+    keys.set(n.node, next);
+  }
+  return keys;
 }
 var localText = (p) => p.kind === "address" ? `${p.col}${p.row}` : p.kind === "range" ? `${p.from.col}${p.from.row}..${p.to.col}${p.to.row}` : `${p.at.col}${p.at.row}.${p.dir}`;
 function footprintCells(e) {
@@ -1633,6 +1669,14 @@ function resolveRelativePlacements(entities, chainOf, resolvedNotes, diagnostics
 }
 function labelsOn(model, e) {
   return model.labelsMode !== "none" || e?.typeWord === "note";
+}
+function labelTextFor(model, node) {
+  if (!node.name) return null;
+  if (model.labelsMode === "keyed") {
+    const key = model.keys.get(node);
+    return key !== void 0 ? String(key) : null;
+  }
+  return node.name;
 }
 var anchorAttr = (model, e) => {
   const anchor = entityAnchor(e);
@@ -2352,18 +2396,22 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
     }
     into.push(el("g", { id: anchor }, ...parts));
     if (e.name && !e.flags.includes("nolabel") && labelsOn(model)) {
-      const at = placeRoomLabel(e.name, cells);
-      layers.roomLabels.push(
-        text(e.name, {
-          x: at.x,
-          y: at.y,
-          "font-size": 10,
-          fill: INK,
-          opacity: 0.8,
-          "text-anchor": "middle",
-          "font-family": "sans-serif"
-        })
-      );
+      const lbl = labelTextFor(model, e);
+      if (lbl !== null) {
+        const at = placeRoomLabel(lbl, cells);
+        layers.roomLabels.push(
+          text(lbl, {
+            x: at.x,
+            y: at.y,
+            "font-size": 10,
+            fill: INK,
+            "font-weight": model.labelsMode === "keyed" ? "bold" : void 0,
+            opacity: 0.8,
+            "text-anchor": "middle",
+            "font-family": "sans-serif"
+          })
+        );
+      }
     }
   }
   function placeRoomLabel(name, cells) {
@@ -2472,14 +2520,24 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
       const first = e.placements.find((p) => p.kind === "edge" || p.kind === "address");
       if (first) {
         const at = first.kind === "edge" ? edgeSegment(first.at, first.dir).a : cellCenter(first);
-        layers.labels.push(text(e.name, { x: at.x, y: at.y - 6, "font-size": 8, fill: INK, "text-anchor": "middle", "font-family": "sans-serif" }));
+        const lbl = labelTextFor(model, e) ?? e.name;
+        layers.labels.push(text(lbl, { x: at.x, y: at.y - 6, "font-size": 8, fill: INK, "font-weight": model.labelsMode === "keyed" ? "bold" : void 0, "text-anchor": "middle", "font-family": "sans-serif" }));
       }
     }
   }
   function fallbackGlyph(e, chain, c, scale, parts) {
     const has = (w) => chain.includes(w);
     if (has("campfire") || has("torch") || has("brazier") || has("lantern")) {
-      parts.push(el("circle", { cx: c.x, cy: c.y, r: 5 * scale, fill: "#d9822b", stroke: "#a8541e", "stroke-width": 1.5 }));
+      parts.push(el("circle", { cx: c.x, cy: c.y + 1.5 * scale, r: 6 * scale, fill: "#d9822b", stroke: "#a8541e", "stroke-width": 1.5 }));
+      parts.push(
+        el("path", {
+          d: `M${fmt(c.x - 3 * scale)} ${fmt(c.y - 3 * scale)} Q${fmt(c.x - 1 * scale)} ${fmt(c.y - 9 * scale)} ${fmt(c.x + 1 * scale)} ${fmt(c.y - 5 * scale)} Q${fmt(c.x + 2.5 * scale)} ${fmt(c.y - 8 * scale)} ${fmt(c.x + 3.5 * scale)} ${fmt(c.y - 3.5 * scale)}`,
+          fill: "none",
+          stroke: "#a8541e",
+          "stroke-width": 1.5,
+          "stroke-linecap": "round"
+        })
+      );
       return true;
     }
     if (has("wagon")) {
@@ -2501,10 +2559,24 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
       return true;
     }
     if (has("stairs") || has("ramp")) {
-      for (const [i, w] of [10, 7, 4].entries()) {
+      const facing = pairOf(e.pairs, "facing") ?? "n";
+      const rot = { n: 0, e: 90, s: 180, w: 270 }[facing] ?? 0;
+      const stair = [];
+      for (const [i, w] of [4, 7, 10].entries()) {
         const y = c.y + (i - 1) * 6 * scale;
-        parts.push(el("line", { x1: c.x - w * scale, y1: y, x2: c.x + w * scale, y2: y, stroke: INK, "stroke-width": 2.2 }));
+        stair.push(el("line", { x1: c.x - w * scale, y1: y, x2: c.x + w * scale, y2: y, stroke: INK, "stroke-width": 2.2 }));
       }
+      stair.push(
+        el("path", {
+          d: `M${fmt(c.x - 3 * scale)} ${fmt(c.y - 9 * scale)} L${fmt(c.x)} ${fmt(c.y - 13 * scale)} L${fmt(c.x + 3 * scale)} ${fmt(c.y - 9 * scale)}`,
+          fill: "none",
+          stroke: INK,
+          "stroke-width": 1.8,
+          "stroke-linecap": "round",
+          "stroke-linejoin": "round"
+        })
+      );
+      parts.push(rot === 0 ? stair.join("") : el("g", { transform: `rotate(${rot} ${fmt(c.x)} ${fmt(c.y)})` }, ...stair));
       return true;
     }
     return false;
@@ -2517,7 +2589,7 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
       const base = cellCenter(a);
       const center = { x: base.x + (size - 1) * CELL / 2, y: base.y + (size - 1) * CELL / 2 };
       const radius = 0.38 * CELL * size;
-      const label = addresses.length > 1 ? e.ids[idx] ?? `${e.typeWord}${idx + 1}` : e.name ?? e.ids[0] ?? e.typeWord ?? "?";
+      const label = addresses.length > 1 ? e.ids[idx] ?? `${e.typeWord}${idx + 1}` : labelTextFor(model, e) ?? e.ids[0] ?? e.typeWord ?? "?";
       into.push(
         el(
           "g",
@@ -2572,7 +2644,8 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
       }
       into.push(el("g", { id: anchor }, ...footprintParts));
       if (e.name && !e.flags.includes("nolabel") && labelsOn(model)) {
-        labels.push(text(e.name, { x: center.x, y: r.y + r.h + 10, "font-size": 8, fill: INK, "text-anchor": "middle", "font-family": "sans-serif" }));
+        const lbl = labelTextFor(model, e) ?? e.name;
+        labels.push(text(lbl, { x: center.x, y: r.y + r.h + 10, "font-size": 8, fill: INK, "font-weight": model.labelsMode === "keyed" ? "bold" : void 0, "text-anchor": "middle", "font-family": "sans-serif" }));
       }
       return;
     }
@@ -2611,7 +2684,8 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
     }
     into.push(el("g", { id: anchor }, ...parts));
     if (e.name && !e.flags.includes("nolabel") && labelsOn(model)) {
-      labels.push(text(e.name, { x: c.x, y: c.y + 20, "font-size": 8, fill: INK, "text-anchor": "middle", "font-family": "sans-serif" }));
+      const lbl = labelTextFor(model, e) ?? e.name;
+      labels.push(text(lbl, { x: c.x, y: c.y + 20, "font-size": 8, fill: INK, "font-weight": model.labelsMode === "keyed" ? "bold" : void 0, "text-anchor": "middle", "font-family": "sans-serif" }));
     }
   }
 }
@@ -2804,13 +2878,14 @@ function renderHexcrawl(model, body) {
             contentLayer.push(glyph(word, at));
           });
           if (cell.name && labelsOn(model)) {
+            const lbl = labelTextFor(model, cell) ?? cell.name;
             const anchorId = `cd-${model.doc.docId}-${slugify(cell.name)}`;
-            const y = placer.place(c.x, c.y + R * 0.62, cell.name, 7.5, "middle");
+            const y = placer.place(c.x, c.y + R * 0.62, lbl, 7.5, "middle");
             labelLayer.push(
               el(
                 "g",
                 { id: anchorId },
-                text(cell.name, { x: c.x, y, "font-size": 7.5, fill: INK, "text-anchor": "middle", "font-family": "sans-serif" })
+                text(lbl, { x: c.x, y, "font-size": 7.5, fill: INK, "font-weight": model.labelsMode === "keyed" ? "bold" : void 0, "text-anchor": "middle", "font-family": "sans-serif" })
               )
             );
           }
@@ -2860,8 +2935,9 @@ function renderHexcrawl(model, body) {
           const p = arcPoint(pts, t);
           return { x: p.x, y: p.y - R * 0.55 };
         });
-        const at = placer.placeAlong(candidates, e.name, 8, "middle");
-        labelLayer.push(text(e.name, { x: at.x, y: at.y, "font-size": 8, fill: INK, opacity: 0.8, "font-style": "italic", "text-anchor": "middle", "font-family": "sans-serif" }));
+        const lbl = labelTextFor(model, e) ?? e.name;
+        const at = placer.placeAlong(candidates, lbl, 8, "middle");
+        labelLayer.push(text(lbl, { x: at.x, y: at.y, "font-size": 8, fill: INK, opacity: 0.8, "font-style": "italic", "font-weight": model.labelsMode === "keyed" ? "bold" : void 0, "text-anchor": "middle", "font-family": "sans-serif" }));
       }
       continue;
     }
@@ -2898,11 +2974,12 @@ function renderHexcrawl(model, body) {
           count++;
           if (c.y < minY) minY = c.y;
         }
-        const labelText = e.name.toUpperCase();
+        const keyedLbl = labelTextFor(model, e);
+        const labelText = model.labelsMode === "keyed" && keyedLbl !== null ? keyedLbl : e.name.toUpperCase();
         const width = labelText.length * (11 * 0.58 + 3);
         const y = placer.place(sx / count, minY - R * 1.35, labelText, 11, "middle", width);
         labelLayer.push(
-          text(e.name.toUpperCase(), { x: sx / count, y, "font-size": 11, "letter-spacing": 3, fill: "#7a5aa0", opacity: 0.85, "text-anchor": "middle", "font-family": "sans-serif" })
+          text(labelText, { x: sx / count, y, "font-size": 11, "letter-spacing": model.labelsMode === "keyed" ? void 0 : 3, fill: "#7a5aa0", opacity: 0.85, "font-weight": model.labelsMode === "keyed" ? "bold" : void 0, "text-anchor": "middle", "font-family": "sans-serif" })
         );
       }
     }
@@ -2979,24 +3056,41 @@ function buildLegend(model, width) {
     seen.add(word);
     rows.push({ word, kind });
   };
-  for (const e of model.entities) add(e.typeWord, kindFor(model, e));
-  for (const hex of model.hexLines) {
-    add(hex.terrain, "fill");
-    for (const word of hex.contents) add(word, hasTierGlyph(model.chainOf(word)) ? "tier" : "glyph");
+  const vocabWanted = model.header.get("legend") === "on";
+  if (vocabWanted) {
+    for (const e of model.entities) add(e.typeWord, kindFor(model, e));
+    for (const hex of model.hexLines) {
+      add(hex.terrain, "fill");
+      for (const word of hex.contents) add(word, hasTierGlyph(model.chainOf(word)) ? "tier" : "glyph");
+    }
   }
-  if (rows.length === 0) return { svg: "", height: 0 };
+  const keyRows = [];
+  if (model.labelsMode === "keyed") {
+    for (const [node, n] of model.keys) keyRows.push({ n, name: node.name ?? "" });
+    keyRows.sort((a, b) => a.n - b.n);
+  }
+  if (rows.length === 0 && keyRows.length === 0) return { svg: "", height: 0 };
   const ROW_H = 18;
   const PAD = 10;
   const colWidth = 150;
   const cols = Math.max(1, Math.min(4, Math.floor((width - PAD * 2) / colWidth)));
+  const keyPerCol = Math.ceil(keyRows.length / cols);
   const perCol = Math.ceil(rows.length / cols);
+  const keyBandH = keyRows.length > 0 ? keyPerCol * ROW_H : 0;
   const parts = [
     el("line", { x1: PAD, y1: 0.5, x2: width - PAD, y2: 0.5, stroke: "#c9c2b0", "stroke-width": 1 })
   ];
+  keyRows.forEach((row, i) => {
+    const col = Math.floor(i / keyPerCol);
+    const x = PAD + col * colWidth;
+    const y = PAD + i % keyPerCol * ROW_H + ROW_H / 2;
+    parts.push(text(`${row.n}.`, { x: x + 12, y: y + 3.5, "font-size": 9, "font-weight": "bold", fill: INK, "text-anchor": "end", "font-family": "sans-serif" }));
+    parts.push(text(row.name, { x: x + 18, y: y + 3.5, "font-size": 9, fill: INK, "font-family": "sans-serif" }));
+  });
   rows.forEach((row, i) => {
     const col = Math.floor(i / perCol);
     const x = PAD + col * colWidth;
-    const y = PAD + i % perCol * ROW_H + ROW_H / 2;
+    const y = PAD + keyBandH + i % perCol * ROW_H + ROW_H / 2;
     const chain = model.chainOf(row.word);
     switch (row.kind) {
       case "fill":
@@ -3049,7 +3143,7 @@ function buildLegend(model, width) {
     }
     parts.push(text(row.word, { x: x + 20, y: y + 3.5, "font-size": 9, fill: INK, "font-family": "sans-serif" }));
   });
-  return { svg: parts.join(""), height: PAD * 2 + perCol * ROW_H };
+  return { svg: parts.join(""), height: PAD * 2 + keyBandH + (rows.length > 0 ? perCol * ROW_H : 0) };
 }
 
 // packages/render-svg/src/region.ts
@@ -3228,7 +3322,8 @@ function renderRegion(model, body, size) {
       );
       if (e.name && !e.flags.includes("nolabel") && !overridden(e) && labelsOn(model)) {
         const c = centroid(poly);
-        const labelText = e.name.toUpperCase();
+        const keyedLbl = model.labelsMode === "keyed" ? labelTextFor(model, e) : null;
+        const labelText = keyedLbl ?? e.name.toUpperCase();
         const y = placer.place(c.x, c.y, labelText, 18, "middle", labelText.length * (18 * 0.58 + 6));
         layers.labels.push(
           text(labelText, {
@@ -3262,9 +3357,10 @@ function renderRegion(model, body, size) {
       layers.areas.push(el("g", { id: anchor }, ...areaParts));
       if (e.name && !e.flags.includes("nolabel") && !overridden(e) && labelsOn(model)) {
         const c = r.point ?? centroid(r.polygon);
-        const y = placer.place(c.x, c.y, e.name, 11, "middle");
+        const lbl = labelTextFor(model, e) ?? e.name;
+        const y = placer.place(c.x, c.y, lbl, 11, "middle");
         layers.labels.push(
-          text(e.name, { x: c.x, y, "font-size": 11, fill: ink, opacity: 0.8, "text-anchor": "middle", "font-style": "italic", "font-family": "sans-serif" })
+          text(lbl, { x: c.x, y, "font-size": 11, fill: ink, opacity: 0.8, "font-weight": model.labelsMode === "keyed" ? "bold" : void 0, "text-anchor": "middle", "font-style": "italic", "font-family": "sans-serif" })
         );
       }
       continue;
@@ -3313,9 +3409,10 @@ function renderRegion(model, body, size) {
       }
       if (e.name && !e.flags.includes("nolabel") && !overridden(e) && labelsOn(model)) {
         const mid = r.polyline[Math.floor(r.polyline.length / 2)];
-        const y = placer.place(mid.x + 4, mid.y - 4, e.name, 10, "start");
+        const lbl = labelTextFor(model, e) ?? e.name;
+        const y = placer.place(mid.x + 4, mid.y - 4, lbl, 10, "start");
         layers.labels.push(
-          text(e.name, { x: mid.x + 4, y, "font-size": 10, fill: ink, opacity: 0.75, "font-style": "italic", "font-family": "sans-serif" })
+          text(lbl, { x: mid.x + 4, y, "font-size": 10, fill: ink, opacity: 0.75, "font-weight": model.labelsMode === "keyed" ? "bold" : void 0, "font-style": "italic", "font-family": "sans-serif" })
         );
       }
       continue;
@@ -3338,7 +3435,7 @@ function renderRegion(model, body, size) {
           }) : el("circle", { cx: r.point.x, cy: r.point.y, r: tier.r, fill: ink, stroke: "#fff", "stroke-width": 1 })
         )
       );
-      const label = e.name ?? (e.typeWord === "note" ? e.texts[0] ?? null : null) ?? (hasTierGlyph(chain) ? null : e.typeWord);
+      const label = (e.name !== null ? labelTextFor(model, e) ?? e.name : null) ?? (e.typeWord === "note" ? e.texts[0] ?? null : null) ?? (hasTierGlyph(chain) ? null : e.typeWord);
       if (label && !e.flags.includes("nolabel") && !overridden(e) && labelsOn(model, e)) {
         const spot = placer.placeBeside(r.point.x + tier.r + 3, r.point.x - tier.r - 3, r.point.y + 4, label, tier.font);
         layers.labels.push(
@@ -3501,7 +3598,7 @@ function render(doc, options = {}) {
     body.push(el("rect", { x: 0, y: 0, width: w, height: h, fill: theme.surface("paper", "fill", PAPER) }));
     renderRegion(model, body, { w, h, scale });
   }
-  if (model.header.get("legend") === "on") {
+  if (model.header.get("legend") === "on" || model.labelsMode === "keyed") {
     const legend = buildLegend(model, w);
     if (legend.height > 0) {
       const band = el("rect", { x: 0, y: 0, width: w, height: legend.height, fill: theme.surface("paper", "fill", PAPER) });
