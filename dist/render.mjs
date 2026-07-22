@@ -1,5 +1,5 @@
 // packages/action/src/render.ts
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 // packages/core/src/diagnostics.ts
@@ -1192,6 +1192,7 @@ function el(name, attrs, ...children) {
   const body = children.join("");
   return body ? `<${name}${attrText}>${body}</${name}>` : `<${name}${attrText}/>`;
 }
+var svgTitle = (content) => `<title>${esc(content)}</title>`;
 var text = (content, attrs) => `<text${Object.entries(attrs).filter(([, v]) => v !== void 0).map(([k, v]) => ` ${k}="${typeof v === "number" ? fmt(v) : esc(String(v))}"`).join("")}>${esc(content)}</text>`;
 var pointsAttr = (pts) => pts.map((p) => `${fmt(p.x)},${fmt(p.y)}`).join(" ");
 function rng(seed) {
@@ -1998,7 +1999,7 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
   for (const e of model.entities) {
     const anchor = anchorAttr(model, e);
     const title = [gmTitleFor(model, e), model.resolvedNotes.get(e)].filter(Boolean).join(" \u2014 ");
-    const titleEl = title ? el("title", {}, title) : "";
+    const titleEl = title ? svgTitle(title) : "";
     const elevation = pairOf(e.pairs, "elevation");
     if (e.section === "terrain") {
       const chain = model.chainOf(e.typeWord);
@@ -2536,7 +2537,7 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
     const isFence = chain.includes("fence");
     const ruined = e.flags.includes("ruined");
     const parts = [titleEl];
-    if (!e.name && !titleEl && e.typeWord) parts.unshift(el("title", {}, e.typeWord));
+    if (!e.name && !titleEl && e.typeWord) parts.unshift(svgTitle(e.typeWord));
     for (const p of e.placements) {
       if (p.kind === "edge") {
         const s = edgeSegment(p.at, p.dir);
@@ -2664,7 +2665,7 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
       const chainR = model.chainOf(e.typeWord);
       const center = { x: r.x + r.w / 2, y: r.y + r.h / 2 };
       const footprintParts = [titleEl];
-      if (!e.name && !titleEl && e.typeWord) footprintParts.unshift(el("title", {}, e.typeWord));
+      if (!e.name && !titleEl && e.typeWord) footprintParts.unshift(svgTitle(e.typeWord));
       const light2 = pairOf(e.pairs, "light") ?? model.facetOf(e.typeWord, "light");
       if (light2) {
         const radius = measureToCells(light2, model) * CELL;
@@ -2727,7 +2728,7 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
       parts.push(el("rect", { x: c.x - 6, y: c.y - 6, width: 12, height: 12, fill, stroke: INK, "stroke-width": 1 }));
     }
     if (!e.name && !hasBattlemapGlyph(chain) && !themedGlyph && !drewFallback && !titleEl && e.typeWord) {
-      parts.unshift(el("title", {}, e.typeWord));
+      parts.unshift(svgTitle(e.typeWord));
     }
     into.push(el("g", { id: anchor }, ...parts));
     if (e.name && !e.flags.includes("nolabel") && labelsOn(model)) {
@@ -3101,7 +3102,7 @@ function renderHexcrawl(model, body) {
       const seen = !gmMode && !!cell && cell.flags.includes("seen");
       const fill = fogged ? model.theme.surface("fog", "fill", FOG) : model.theme.terrainFill(model.chainOf(cell.terrain));
       const parts = [];
-      if (gmMode && cell?.gm) parts.push(el("title", {}, cell.gm));
+      if (gmMode && cell?.gm) parts.push(svgTitle(cell.gm));
       parts.push(el("polygon", { points: poly, fill, stroke: GRID_LINE, "stroke-width": 1 }));
       if (!fogged && cell) {
         if (seen) {
@@ -3161,7 +3162,7 @@ function renderHexcrawl(model, body) {
         el(
           "g",
           { id: e.name ? `cd-${model.doc.docId}-${slugify(e.name)}` : void 0 },
-          title ? el("title", {}, title) : "",
+          title ? svgTitle(title) : "",
           el("polyline", { points: pointsAttr(pts), fill: "none", stroke: stroke.stroke, "stroke-width": chain.includes("river") ? 4 : 3, "stroke-dasharray": stroke.dash ?? (chain.includes("road") ? "8 4" : void 0), "stroke-linejoin": "round", "stroke-linecap": "round", opacity: 0.85 })
         )
       );
@@ -3762,7 +3763,7 @@ function renderRegion(model, body, size, diagnostics = []) {
   for (const { e, r, chain } of items) {
     const anchor = anchorAttr(model, e);
     const title = gmTitleFor(model, e);
-    const titleEl = title ? el("title", {}, title) : "";
+    const titleEl = title ? svgTitle(title) : "";
     const wordFill = theme.terrainFill(chain);
     if (chain.includes("border")) {
       borderDecls.push(e);
@@ -4158,7 +4159,7 @@ function renderRegion(model, body, size, diagnostics = []) {
             for (const b of pick.boxes) placer.claimBox(b.cx, b.top, pick.wpx / pick.boxes.length, 9);
             const pid = `cdlp-${model.doc.docId}-${pathLabelCount++}`;
             const d = `M${fmt(lp[0].x)} ${fmt(lp[0].y)}` + lp.slice(1).map((pt) => `L${fmt(pt.x)} ${fmt(pt.y)}`).join("");
-            const safe = lbl.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+            const safe = esc(lbl);
             const weight = model.labelsMode === "keyed" ? ' font-weight="bold"' : "";
             labelBuckets[2].push(
               `<path id="${pid}" d="${d}" fill="none"/><text font-size="${pick.size}" fill="${ink}" opacity="${isRidge ? 0.9 : 0.75}" font-style="italic"${weight} text-anchor="middle" font-family="sans-serif"><textPath href="#${pid}" startOffset="${fmt(pick.offset * 100)}%"><tspan dy="${fmt(isRidge ? 3.5 : pick.above ? -5 : 12)}">${safe}</tspan></textPath></text>`
@@ -4338,7 +4339,7 @@ function renderRegion(model, body, size, diagnostics = []) {
             el(
               "g",
               {},
-              title ? el("title", {}, title) : "",
+              title ? svgTitle(title) : "",
               el("polyline", { points: pointsAttr(pts), fill: "none", stroke: stateFill, "stroke-width": 7, opacity: 0.25, "stroke-linejoin": "round", "stroke-linecap": "round" }),
               el("polyline", { points: pointsAttr(pts), fill: "none", stroke, "stroke-width": 1.6, "stroke-dasharray": "9 4 2 4", opacity: 0.9, "stroke-linejoin": "round", "stroke-linecap": "round" })
             )
@@ -4546,6 +4547,20 @@ function scatterGlyphs(poly, glyphValue, theme, ink) {
   return out;
 }
 
+// packages/render-svg/src/provenance.ts
+var NOTICE = "generated by chartdown - do not hand-edit";
+var MARKER_RE = /<metadata data-chartdown-source="([^"]*)" data-chartdown-doc="([^"]*)" data-chartdown-mode="([^"]*)" data-chartdown-output="([^"]*)">[^<]*<\/metadata>/;
+var unesc = (s) => s.replace(/&quot;/g, '"').replace(/&gt;/g, ">").replace(/&lt;/g, "<").replace(/&amp;/g, "&");
+function stampProvenance(svg, p) {
+  const marker = `<metadata data-chartdown-source="${esc(p.source)}" data-chartdown-doc="${esc(p.docId)}" data-chartdown-mode="${esc(p.mode)}" data-chartdown-output="${esc(p.output)}">${NOTICE}</metadata>`;
+  const cleared = svg.replace(MARKER_RE, "");
+  return cleared.replace(/^(<svg[^>]*>)/, `$1${marker}`);
+}
+function readProvenance(svg) {
+  const m = MARKER_RE.exec(svg);
+  return m ? { source: unesc(m[1]), docId: unesc(m[2]), mode: unesc(m[3]), output: unesc(m[4]) } : null;
+}
+
 // packages/render-svg/src/index.ts
 function render(doc, options = {}) {
   const mode = options.mode ?? "player";
@@ -4703,6 +4718,7 @@ function renderSource(source, options = {}) {
 }
 
 // packages/action/src/lib.ts
+var normalizePath = (p) => p.replace(/\\/g, "/").replace(/^\.\//, "");
 var SKIP_DIRS = /* @__PURE__ */ new Set(["node_modules", ".git", ".obsidian", "dist"]);
 var shouldSkipDir = (name) => SKIP_DIRS.has(name) || name.startsWith(".");
 var isMapDocument = (source) => /^map\s*:/m.test(source);
@@ -4717,6 +4733,7 @@ var outName = (base, mode) => `${base}${mode === "gm" ? "-gm" : ""}.svg`;
 function renderCdFile(path, source, opts2) {
   const base = path.replace(/\.cd$/, "");
   const report = { path, errors: [], jobs: [] };
+  const docId = parse(source).document.docId;
   for (const mode of modesFor(opts2.mode)) {
     const options = { mode };
     if (opts2.theme !== void 0) options.theme = opts2.theme;
@@ -4724,7 +4741,11 @@ function renderCdFile(path, source, opts2) {
     for (const d of diagnostics) {
       if (d.severity === "error") report.errors.push(`${path}:${d.line}: ${d.message}`);
     }
-    report.jobs.push({ outPath: outName(base, mode), svg });
+    const outPath = outName(base, mode);
+    report.jobs.push({
+      outPath,
+      svg: stampProvenance(svg, { source: normalizePath(path), docId, mode, output: normalizePath(outPath) })
+    });
   }
   return report;
 }
@@ -4744,10 +4765,40 @@ function renderMarkdownFile(path, markdown, opts2) {
       for (const d of diagnostics) {
         if (d.severity === "error") report.errors.push(`${path} (fence ${docId}):${d.line}: ${d.message}`);
       }
-      report.jobs.push({ outPath: outName(`${base}.${docId}${suffix}`, mode), svg });
+      const outPath = outName(`${base}.${docId}${suffix}`, mode);
+      report.jobs.push({
+        outPath,
+        svg: stampProvenance(svg, { source: normalizePath(path), docId, mode, output: normalizePath(outPath) })
+      });
     }
   }
   return report;
+}
+function findOrphans(svgs, producedPaths, sourcePaths) {
+  const fold = (p) => normalizePath(p).toLowerCase();
+  const produced2 = new Set([...producedPaths].map(fold));
+  const sources = new Set([...sourcePaths].map(fold));
+  const report = { orphans: [], suspects: [] };
+  for (const f of svgs) {
+    if (produced2.has(fold(f.path))) continue;
+    const marker = readProvenance(f.content);
+    if (marker) {
+      if (fold(marker.output) === fold(f.path)) report.orphans.push(f.path);
+    } else if (looksDerived(fold(f.path), sources)) {
+      report.suspects.push(f.path);
+    }
+  }
+  return report;
+}
+function looksDerived(foldedPath, foldedSources) {
+  const base = foldedPath.replace(/\.svg$/, "").replace(/-gm$/, "");
+  if (foldedSources.has(`${base}.cd`)) return true;
+  const dot = base.lastIndexOf(".");
+  if (dot > base.lastIndexOf("/")) {
+    const mdBase = base.slice(0, dot);
+    return foldedSources.has(`${mdBase}.md`) || foldedSources.has(`${mdBase}.markdown`);
+  }
+  return false;
 }
 
 // packages/action/src/render.ts
@@ -4758,9 +4809,11 @@ var opts = {
   markdown: env("MARKDOWN", "true") !== "false",
   verify: env("VERIFY", "false") === "true"
 };
+var clean = ["warn", "true", "false"].includes(env("CLEAN", "warn")) ? env("CLEAN", "warn") : "warn";
 var themePath = env("THEME", "");
 if (themePath) opts.theme = readFileSync(themePath, "utf8");
 var files = [];
+var svgFiles = [];
 var walk = (dir) => {
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry);
@@ -4768,6 +4821,8 @@ var walk = (dir) => {
       if (!shouldSkipDir(entry)) walk(full);
     } else if (/\.cd$/.test(entry) || opts.markdown && /\.(md|markdown)$/i.test(entry)) {
       files.push(full);
+    } else if (/\.svg$/i.test(entry)) {
+      svgFiles.push(full);
     }
   }
 };
@@ -4777,15 +4832,19 @@ var unchanged = 0;
 var errors = [];
 var drift = [];
 var skipped = 0;
+var produced = /* @__PURE__ */ new Set();
+var scannedSources = /* @__PURE__ */ new Set();
 for (const path of files) {
   const content = readFileSync(path, "utf8");
   if (/\.cd$/.test(path) && !isMapDocument(content)) {
     skipped++;
     continue;
   }
+  scannedSources.add(normalizePath(path));
   const report = /\.cd$/.test(path) ? renderCdFile(path, content, opts) : renderMarkdownFile(path, content, opts);
   errors.push(...report.errors);
   for (const job of report.jobs) {
+    produced.add(normalizePath(job.outPath));
     const existing = existsSync(job.outPath) ? readFileSync(job.outPath, "utf8") : null;
     if (existing === job.svg) {
       unchanged++;
@@ -4799,8 +4858,28 @@ for (const path of files) {
     }
   }
 }
+var deleted = 0;
+var orphanDrift = [];
+if (clean !== "false") {
+  const candidates = svgFiles.filter((p) => !produced.has(normalizePath(p))).map((p) => ({ path: p, content: readFileSync(p, "utf8") }));
+  const { orphans, suspects } = findOrphans(candidates, produced, scannedSources);
+  for (const o of orphans) {
+    if (opts.verify) {
+      orphanDrift.push(o);
+    } else if (clean === "true") {
+      unlinkSync(o);
+      deleted++;
+      console.log(`chartdown: deleted orphaned output ${o} (its source no longer produces it)`);
+    } else {
+      console.warn(`chartdown: orphaned output ${o} \u2014 its source no longer produces it; set clean: true to delete, or remove it by hand`);
+    }
+  }
+  for (const s of suspects) {
+    console.warn(`chartdown: ${s} looks generated but carries no provenance marker (pre-marker output?) \u2014 never auto-deleted; remove by hand if stale`);
+  }
+}
 console.log(
-  `chartdown: ${files.length} source file(s) scanned, ${rendered} SVG(s) written, ${unchanged} up to date` + (skipped > 0 ? `, ${skipped} non-map document(s) skipped` : "")
+  `chartdown: ${files.length} source file(s) scanned, ${rendered} SVG(s) written, ${unchanged} up to date` + (deleted > 0 ? `, ${deleted} orphan(s) deleted` : "") + (skipped > 0 ? `, ${skipped} non-map document(s) skipped` : "")
 );
 if (errors.length > 0) {
   console.error(`
@@ -4812,4 +4891,9 @@ if (drift.length > 0) {
 ${drift.length} committed SVG(s) drift from their sources (re-render and commit):`);
   for (const d of drift) console.error(`  ${d}`);
 }
-process.exit(errors.length > 0 || drift.length > 0 ? 1 : 0);
+if (orphanDrift.length > 0) {
+  console.error(`
+${orphanDrift.length} orphaned output(s) \u2014 no source produces them; delete or re-render:`);
+  for (const o of orphanDrift) console.error(`  ${o}`);
+}
+process.exit(errors.length > 0 || drift.length > 0 || orphanDrift.length > 0 ? 1 : 0);
