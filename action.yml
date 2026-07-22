@@ -21,6 +21,9 @@ inputs:
   verify:
     description: "Render and DIFF instead of writing — fail if committed SVGs drift from sources (CI guard mode; implies no commit)"
     default: "false"
+  clean:
+    description: "Orphaned outputs (provenance-stamped SVGs no source produces anymore): warn | true (delete) | false (ignore). Only marker-bearing originals are ever deleted — hand-made SVGs and kept copies are never touched"
+    default: "warn"
   commit:
     description: "Commit and push the rendered SVGs (needs `permissions: contents: write` on the job)"
     default: "true"
@@ -39,6 +42,7 @@ runs:
         INPUT_MARKDOWN: ${{ inputs.markdown }}
         INPUT_THEME: ${{ inputs.theme }}
         INPUT_VERIFY: ${{ inputs.verify }}
+        INPUT_CLEAN: ${{ inputs.clean }}
       run: node "${{ github.action_path }}/dist/render.mjs"
     - name: Commit rendered maps
       if: inputs.commit == 'true' && inputs.verify != 'true'

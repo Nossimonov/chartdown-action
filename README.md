@@ -46,10 +46,19 @@ ford : on redford on tollroad difficult
 | `markdown` | `true` | Also render fences inside `.md` files |
 | `theme` | | Path to a Chartdown theme document |
 | `verify` | `false` | Render and **diff** instead of writing — CI fails if committed SVGs drift from sources |
+| `clean` | `warn` | Orphaned outputs: `warn` \| `true` (delete) \| `false` (ignore) — see below |
 | `commit` | `true` | Commit + push rendered SVGs (job needs `permissions: contents: write`) |
 | `commit-message` | `Render Chartdown maps` | |
 
 Render errors fail the run with `file:line` diagnostics that cite the spec sections they enforce. Theme and vocabulary `.cd` documents (no `map:` header) are skipped.
+
+## Provenance and orphan cleanup
+
+Every SVG the action writes carries a `<metadata>` provenance marker recording its source, doc id, mode, and output path (no timestamps or versions — re-renders stay byte-identical). Rename a doc, delete a fence, or switch `mode`, and the old output becomes an **orphan**: still on disk, still showing in docs as if current, produced by nothing.
+
+An SVG is treated as an orphan only when *all three* hold: it bears the marker, the marker's recorded output path is the file's own path, and no current render job produces that path. Hand-made SVGs carry no marker; a copy of a generated SVG you kept deliberately records its *old* path — both always survive. `clean: warn` (the default) reports orphans, `clean: true` deletes them (the commit step stages deletions automatically), `clean: false` skips the scan. In `verify` mode an orphan fails the run like any other drift.
+
+The first run with a marker-aware renderer rewrites every output once to stamp it — a one-time reconciliation commit. Pre-marker orphans can't be identified with certainty; obviously suspicious ones are warned about but never auto-deleted.
 
 ## Verify mode (CI guard)
 
