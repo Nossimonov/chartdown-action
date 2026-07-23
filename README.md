@@ -37,6 +37,26 @@ ford : on redford on tollroad difficult
 
 …push, and the image link resolves. A fence in `notes/session-3.md` renders to `notes/session-3.<doc-id>.svg`; a standalone `maps/keep.cd` renders to `maps/keep.svg` (and `keep-gm.svg` with `mode: both`).
 
+## Big map? Collapse the source
+
+A detailed map means a long fence, and a long fence disrupts the read. The source has to stay in the document — it *is* the map — but it doesn't have to be open: wrap the fence in a `<details>` block and GitHub folds it away, collapsed by default. The rendered image carries the flow; the source is one click from anyone who wants it; the Action extracts fences inside `<details>` exactly the same (keep the blank lines around the fence — they're what lets the Markdown inside the HTML render):
+
+````markdown
+![The approach to the estate](./session-3.garls-estate.svg)
+
+<details>
+<summary>Map source (Chartdown)</summary>
+
+```chartdown
+# Garl's Estate
+map: battlemap
+grid: square 30x22
+…
+```
+
+</details>
+````
+
 ## Inputs
 
 | Input | Default | |
