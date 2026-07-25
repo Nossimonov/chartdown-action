@@ -561,6 +561,7 @@ function parseVocabLine(text2, line, source, diagnostics) {
   };
 }
 function parseVocabDocument(source, origin, table, diagnostics) {
+  const added = [];
   let inVocab = false;
   for (const raw of splitLines(source)) {
     if (raw.text.startsWith("#")) continue;
@@ -572,8 +573,12 @@ function parseVocabDocument(source, origin, table, diagnostics) {
     }
     if (!inVocab) continue;
     const entry = parseVocabLine(raw.text, raw.line, origin, diagnostics);
-    if (entry) table.add(entry, diagnostics);
+    if (entry) {
+      table.add(entry, diagnostics);
+      added.push(entry);
+    }
   }
+  return added;
 }
 function loadStdlib(table) {
   const scratch = [];
@@ -761,6 +766,7 @@ function parse(source, options = {}) {
     grid: null,
     levels: [],
     defaultLevel: "",
+    importedVocab: [],
     sections: []
   };
   let i = 0;
@@ -805,7 +811,7 @@ function parse(source, options = {}) {
       if (lib === void 0) {
         diagnostics.push(warning(raw.line, `library '${value}' not provided to the parser \u2014 its vocabulary is unavailable`));
       } else {
-        parseVocabDocument(lib, "library", vocab, diagnostics);
+        document.importedVocab.push(...parseVocabDocument(lib, "library", vocab, diagnostics));
       }
     } else if (key === "id") {
       document.docId = value;
@@ -1547,12 +1553,14 @@ function buildModel(doc, mode, theme, diagnostics = []) {
   const vocab = new VocabTable();
   loadStdlib(vocab);
   const scratch = [];
+  for (const entry of doc.importedVocab) vocab.add(entry, scratch);
   for (const section of doc.sections) {
     for (const entry of section.entries) {
       if (entry.kind === "vocab-entry") vocab.add(entry, scratch);
     }
   }
   const chainOf = (word) => word ? vocab.chain(word) : [];
+  const archetypeOf = (word) => word ? vocab.archetypeOf(word) : null;
   const facetOf = (word, key) => word ? vocab.facetOf(word, key) : void 0;
   const labelsHeader = header.get("labels");
   const labelsMode = labelsHeader === "none" ? "none" : labelsHeader === "keyed" ? "keyed" : "names";
@@ -1561,7 +1569,7 @@ function buildModel(doc, mode, theme, diagnostics = []) {
     resolveRelativePlacements(entities, chainOf, resolvedNotes, diagnostics);
   }
   const keys = labelsMode === "keyed" ? assignKeys(entities, hexLines, diagnostics) : /* @__PURE__ */ new Map();
-  return { doc, mode, entities, hexLines, labelOverrides, gmNotes, header, seed, theme, labelsMode, keys, chainOf, facetOf, resolvedNotes };
+  return { doc, mode, entities, hexLines, labelOverrides, gmNotes, header, seed, theme, labelsMode, keys, chainOf, archetypeOf, facetOf, resolvedNotes };
 }
 function assignKeys(entities, hexLines, diagnostics) {
   const keys = /* @__PURE__ */ new Map();
@@ -1802,6 +1810,14 @@ var DEFAULT_THEME_SOURCE = [
   "ledge : stroke=#6b5d4a",
   "building : fill=#efe9da",
   "building.open : fill=#e3ddc2 ; unroofed interiors read as outdoor ground (spec 06 par.3)",
+  // Openings and barriers are ordinary theme subjects (#105) — they were
+  // hardcoded at the draw site, so four of the nine archetypes ignored the
+  // theme entirely. Derived words reach these through the chain (#103).
+  "door : stroke=#a8763e width=5",
+  "window : stroke=#6fa8c9 width=2.5",
+  "wall : stroke=#3d3629 width=3",
+  "fence : stroke=#8a7a5c width=2 dash=3,3",
+  "pillar : fill=#5a5244",
   ...Object.entries(TERRAIN_FILLS).map(([word, fill]) => `${word} : fill=${fill}`),
   ...Object.entries(PATH_STROKES).map(
     ([word, s]) => `${word} : stroke=${s.stroke}${s.dash ? ` dash=${s.dash.replace(" ", ",")}` : ""}`
@@ -1910,10 +1926,9 @@ function collectWalls(model) {
   for (const e of model.entities) {
     if (e.archetype !== "structure") continue;
     for (const d of e.details) {
+      if (model.archetypeOf(d.typeWord) !== "opening") continue;
       const chain = model.chainOf(d.typeWord);
-      const isWindow = chain.includes("window");
-      const isDoor = !isWindow && (chain.includes("door") || chain.includes("gate"));
-      if (!isWindow && !isDoor) continue;
+      const isWindow = chain.includes("window") || chain.includes("arrow-slit");
       for (const p of d.placements) {
         if (p.kind !== "edge") continue;
         const seg = edgeSegment(p.at, p.dir);
@@ -1969,6 +1984,22 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
     tokens: [],
     labels: []
   };
+  let openEdgeCache = null;
+  const openingEdgeKeys = () => {
+    if (openEdgeCache) return openEdgeCache;
+    const keys = /* @__PURE__ */ new Set();
+    for (const e of model.entities) {
+      if (e.archetype !== "structure") continue;
+      for (const d of e.details) {
+        if (model.archetypeOf(d.typeWord) !== "opening") continue;
+        for (const p of d.placements) {
+          if (p.kind === "edge") keys.add(segKey(edgeSegment(p.at, p.dir)));
+        }
+      }
+    }
+    openEdgeCache = keys;
+    return keys;
+  };
   const pathRecords = [];
   const crossingCells = /* @__PURE__ */ new Set();
   const pendingCrossings = [];
@@ -2001,6 +2032,10 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
     const title = [gmTitleFor(model, e), model.resolvedNotes.get(e)].filter(Boolean).join(" \u2014 ");
     const titleEl = title ? svgTitle(title) : "";
     const elevation = pairOf(e.pairs, "elevation");
+    if (model.chainOf(e.typeWord).includes("note")) {
+      renderFreeText(e, layers.labels, titleEl, anchor);
+      continue;
+    }
     if (e.section === "terrain") {
       const chain = model.chainOf(e.typeWord);
       if (chain.includes("ford") || chain.includes("bridge")) {
@@ -2420,22 +2455,47 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
       parts.push(el("path", { d, fill, opacity: 0.8 }));
     }
     const ruinedSides = new Set(e.details.filter((d) => d.typeWord === "ruined").flatMap((d) => d.flags));
-    for (const run of mergeEdgeRuns(perimeterEdges(cells))) {
-      const ruined = ruinedSides.has(SIDE_NAME[run.dir]) || ruinedSides.has(run.dir);
-      parts.push(el("line", { x1: run.x1, y1: run.y1, x2: run.x2, y2: run.y2, stroke: INK, "stroke-width": 3, "stroke-dasharray": ruined ? "5 6" : void 0, opacity: ruined ? 0.7 : 1 }));
+    const ruinedAll = e.flags.includes("ruined");
+    const openEdges = openingEdgeKeys();
+    const solidEdges = perimeterEdges(cells).filter((pe) => {
+      const address = { kind: "address", col: colLetters(pe.cell.col), row: pe.cell.row };
+      return !openEdges.has(segKey(edgeSegment(address, pe.dir)));
+    });
+    const structChain = model.chainOf(e.typeWord);
+    const wallCtx = open ? { state: "open" } : {};
+    const wallStroke = model.theme.prop(structChain, "stroke", wallCtx) ?? INK;
+    const wallWidth = Number(model.theme.prop(structChain, "width", wallCtx) ?? 3) || 3;
+    for (const run of mergeEdgeRuns(solidEdges)) {
+      const ruined = ruinedAll || ruinedSides.has(SIDE_NAME[run.dir]) || ruinedSides.has(run.dir);
+      const ruinedStroke = ruined ? model.theme.prop(structChain, "stroke", { state: "ruined" }) : void 0;
+      const ruinedDash = ruined ? model.theme.prop(structChain, "dash", { state: "ruined" })?.replace(",", " ") : void 0;
+      parts.push(
+        el("line", {
+          x1: run.x1,
+          y1: run.y1,
+          x2: run.x2,
+          y2: run.y2,
+          stroke: ruinedStroke ?? wallStroke,
+          "stroke-width": wallWidth,
+          "stroke-dasharray": ruined ? ruinedDash ?? "5 6" : model.theme.prop(structChain, "dash", wallCtx)?.replace(",", " "),
+          opacity: ruined ? 0.7 : 1
+        })
+      );
     }
     for (const d of e.details) {
       for (const p of d.placements) {
         if (p.kind !== "edge") continue;
         const o = cellOrigin(p.at);
         const seg = p.dir === "n" ? { x1: o.x, y1: o.y, x2: o.x + CELL, y2: o.y } : p.dir === "s" ? { x1: o.x, y1: o.y + CELL, x2: o.x + CELL, y2: o.y + CELL } : p.dir === "w" ? { x1: o.x, y1: o.y, x2: o.x, y2: o.y + CELL } : { x1: o.x + CELL, y1: o.y, x2: o.x + CELL, y2: o.y + CELL };
-        if (d.typeWord === "door" || d.typeWord === "gate") {
-          layers.openings.push(el("line", { ...seg, stroke: "#a8763e", "stroke-width": 5 }));
-        } else if (d.typeWord === "window" || d.typeWord === "arrow-slit") {
-          layers.openings.push(el("line", { ...seg, stroke: "#6fa8c9", "stroke-width": 2.5 }));
-        } else {
-          parts.push(el("line", { ...seg, stroke: INK, "stroke-width": 3 }));
+        const openingChain = model.chainOf(d.typeWord);
+        if (model.archetypeOf(d.typeWord) !== "opening") {
+          parts.push(el("line", { ...seg, stroke: model.theme.prop(openingChain, "stroke") ?? INK, "stroke-width": 3 }));
+          continue;
         }
+        const windowLike = openingChain.includes("window") || openingChain.includes("arrow-slit");
+        const stroke = model.theme.prop(openingChain, "stroke") ?? (windowLike ? "#6fa8c9" : "#a8763e");
+        const width = Number(model.theme.prop(openingChain, "width") ?? (windowLike ? 2.5 : 5)) || (windowLike ? 2.5 : 5);
+        layers.openings.push(el("line", { ...seg, stroke, "stroke-width": width }));
       }
     }
     into.push(el("g", { id: anchor }, ...parts));
@@ -2505,12 +2565,54 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
     }
     return best;
   }
+  function renderFreeText(e, into, titleEl, anchor) {
+    const label = e.texts[0] ?? e.name;
+    if (!label) return;
+    const range = e.placements.find((p) => p.kind === "range");
+    const address = e.placements.find((p) => p.kind === "address");
+    let at = null;
+    let span = 0;
+    if (range) {
+      const r = rangeRect(range);
+      at = { x: r.x + r.w / 2, y: r.y + r.h / 2 };
+      span = r.w;
+    } else if (address) {
+      at = cellCenter(address);
+    }
+    if (!at) {
+      diagnostics.push({
+        severity: "warning",
+        line: e.line,
+        message: `free text "${label}" has no cell or range placement \u2014 this renderer draws nothing for it (spec 07 \xA72)`
+      });
+      return;
+    }
+    const size = 9;
+    const spacing = e.flags.includes("sprawl") && span > 0 ? Math.max(0, (span - label.length * size * 0.58) / Math.max(1, label.length - 1)) : void 0;
+    into.push(
+      el(
+        "g",
+        { id: anchor },
+        titleEl,
+        text(label, {
+          x: at.x,
+          y: at.y,
+          "font-size": size,
+          "letter-spacing": spacing,
+          fill: INK,
+          "text-anchor": "middle",
+          "font-family": "sans-serif"
+        })
+      )
+    );
+  }
   function renderZone(e, into, labels, titleEl, anchor, elevation) {
     const range = e.placements.find((p) => p.kind === "range");
     if (!range) return;
     const r = rangeRect(range);
     const gmZone = e.gmOnly;
-    const stroke = gmZone ? "#b5504a" : elevation ? "#6b5d4a" : "#4a9a6a";
+    const themed = model.theme.prop(model.chainOf(e.typeWord), "fill");
+    const stroke = themed ?? (gmZone ? "#b5504a" : elevation ? "#6b5d4a" : "#4a9a6a");
     into.push(
       el(
         "g",
@@ -2521,7 +2623,7 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
           y: r.y,
           width: r.w,
           height: r.h,
-          fill: gmZone ? "#b5504a" : elevation ? "#efe6d2" : "#4a9a6a",
+          fill: themed ?? (gmZone ? "#b5504a" : elevation ? "#efe6d2" : "#4a9a6a"),
           opacity: elevation ? 0.7 : 0.12
         }),
         el("rect", { x: r.x, y: r.y, width: r.w, height: r.h, fill: "none", stroke, "stroke-width": elevation ? 3.5 : 1.5, "stroke-dasharray": elevation ? void 0 : "6 4" })
@@ -2538,6 +2640,9 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
     const ruined = e.flags.includes("ruined");
     const parts = [titleEl];
     if (!e.name && !titleEl && e.typeWord) parts.unshift(svgTitle(e.typeWord));
+    const themedStroke = model.theme.prop(chain, "stroke");
+    const themedDash = model.theme.prop(chain, "dash")?.replace(",", " ");
+    const themedWidth = model.theme.prop(chain, "width");
     for (const p of e.placements) {
       if (p.kind === "edge") {
         const s = edgeSegment(p.at, p.dir);
@@ -2547,16 +2652,22 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
             y1: s.a.y,
             x2: s.b.x,
             y2: s.b.y,
-            stroke: isFence ? "#8a7a5c" : INK,
-            "stroke-width": isFence ? 2 : 3,
-            "stroke-dasharray": isFence ? "3 3" : ruined ? "5 6" : void 0,
+            stroke: themedStroke ?? (isFence ? "#8a7a5c" : INK),
+            "stroke-width": Number(themedWidth ?? (isFence ? 2 : 3)) || (isFence ? 2 : 3),
+            "stroke-dasharray": ruined && !isFence ? "5 6" : themedDash ?? (isFence ? "3 3" : void 0),
             opacity: ruined ? 0.7 : 1,
             "stroke-linecap": "square"
           })
         );
       } else if (p.kind === "address") {
         const c = cellCenter(p);
-        parts.push(el("rect", { x: c.x - 6, y: c.y - 6, width: 12, height: 12, fill: "#5a5244", stroke: INK, "stroke-width": 1 }));
+        const glyph2 = model.theme.glyphFor(chain, c.x, c.y);
+        if (glyph2) {
+          parts.push(themedGlyphPath(glyph2, chain, c));
+        } else {
+          const fill = model.theme.prop(chain, "fill") ?? "#5a5244";
+          parts.push(el("rect", { x: c.x - 6, y: c.y - 6, width: 12, height: 12, fill, stroke: INK, "stroke-width": 1 }));
+        }
       }
     }
     into.push(el("g", { id: anchor }, ...parts));
@@ -2568,6 +2679,13 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
         layers.labels.push(text(lbl, { x: at.x, y: at.y - 6, "font-size": 8, fill: INK, "font-weight": model.labelsMode === "keyed" ? "bold" : void 0, "text-anchor": "middle", "font-family": "sans-serif" }));
       }
     }
+  }
+  function themedGlyphPath(d, chain, c) {
+    const fill = model.theme.prop(chain, "fill");
+    const stroke = model.theme.prop(chain, "stroke") ?? model.theme.surface("ink", "fill", INK);
+    const width = Number(model.theme.prop(chain, "width") ?? 1.6) || 1.6;
+    const opacity = model.theme.prop(chain, "opacity");
+    return `<path d="${d}" transform="translate(${fmt(c.x)} ${fmt(c.y)}) scale(0.9)" fill="${fill ?? "none"}" stroke="${stroke}" stroke-width="${fmt(width)}"${opacity ? ` opacity="${opacity}"` : ""} vector-effect="non-scaling-stroke" stroke-linecap="round"/>`;
   }
   function fallbackGlyph(e, chain, c, scale, parts) {
     const has = (w) => chain.includes(w);
@@ -2717,10 +2835,7 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
     const themedGlyph = model.theme.glyphFor(chain, c.x, c.y);
     let drewFallback = false;
     if (themedGlyph) {
-      const ink = model.theme.surface("ink", "fill", INK);
-      parts.push(
-        `<path d="${themedGlyph}" transform="translate(${fmt(c.x)} ${fmt(c.y)}) scale(0.9)" fill="none" stroke="${ink}" stroke-width="1.6" vector-effect="non-scaling-stroke" stroke-linecap="round"/>`
-      );
+      parts.push(themedGlyphPath(themedGlyph, chain, c));
     } else if (fallbackGlyph(e, chain, c, 1, parts)) {
       drewFallback = true;
     } else {
@@ -3760,6 +3875,12 @@ function renderRegion(model, body, size, diagnostics = []) {
   const massifs = [];
   const realmInfos = [];
   const borderDecls = [];
+  const waterPolys = [];
+  const hasWater = items.some(
+    ({ e, chain }) => e.section === "water" || chain.some((word) => word === "sea" || word === "lake" || word === "water")
+  );
+  const landMaskId = `cd-land-${model.doc.docId}`;
+  const landMask = hasWater ? `url(#${landMaskId})` : void 0;
   for (const { e, r, chain } of items) {
     const anchor = anchorAttr(model, e);
     const title = gmTitleFor(model, e);
@@ -3769,11 +3890,40 @@ function renderRegion(model, body, size, diagnostics = []) {
       borderDecls.push(e);
       continue;
     }
+    if (chain.includes("note")) {
+      const label = e.texts[0] ?? e.name;
+      const at = r.point ?? (r.polygon ? centroid(r.polygon) : null);
+      if (label && at) {
+        const span = r.polygon ? Math.max(...r.polygon.map((p) => p.x)) - Math.min(...r.polygon.map((p) => p.x)) : 0;
+        const size2 = 11;
+        const spacing = e.flags.includes("sprawl") && span > 0 ? Math.max(0, (span - label.length * size2 * 0.58) / Math.max(1, label.length - 1)) : void 0;
+        labelBuckets[0].push(
+          text(label, {
+            x: at.x,
+            y: at.y,
+            "font-size": size2,
+            "letter-spacing": spacing,
+            fill: INK,
+            opacity: 0.85,
+            "text-anchor": "middle",
+            "font-family": "sans-serif"
+          })
+        );
+      } else if (label) {
+        diagnostics.push({
+          severity: "warning",
+          line: e.line,
+          message: `free text "${label}" has no point or area placement \u2014 this renderer draws nothing for it (spec 07 \xA72)`
+        });
+      }
+      continue;
+    }
     if (r.halfPlane) {
       const poly = halfPlanePolygon(r.halfPlane, w, h);
       const isWater = e.section === "water";
       const isZone = !isWater && e.archetype === "zone";
       if (isWater) {
+        waterPolys.push(poly);
         layers.water.push(el("g", { id: anchor }, titleEl, el("polygon", { points: pointsAttr(poly), fill: theme.terrainFill(["sea"]) })));
       } else if (isZone) {
         const realmFill = theme.prop(chain, "fill") ?? wordTint(keyOf2(e));
@@ -3811,6 +3961,7 @@ function renderRegion(model, body, size, diagnostics = []) {
         const isLake = chain.includes("lake");
         const waterFill = theme.terrainFill(isLake ? ["lake"] : ["sea"]);
         const shore = r.polygon;
+        waterPolys.push(shore);
         (isLake ? layers.areas : layers.water).push(
           el(
             "g",
@@ -3956,7 +4107,7 @@ function renderRegion(model, body, size, diagnostics = []) {
       if (glyphName) {
         areaParts.push(...scatterGlyphs(r.polygon, glyphName, theme, ink));
       }
-      layers.areas.push(el("g", { id: anchor }, ...areaParts));
+      layers.areas.push(el("g", { id: anchor, mask: e.archetype === "terrain" ? landMask : void 0 }, ...areaParts));
       if (e.name && !e.flags.includes("nolabel") && !overridden(e) && labelsOn(model)) {
         deferLabel(3, () => {
           const c = r.point ?? centroid(r.polygon);
@@ -4211,12 +4362,12 @@ function renderRegion(model, body, size, diagnostics = []) {
       groups.push(
         el(
           "g",
-          { opacity: 0.55 },
+          { opacity: 0.55, mask: landMask },
           ...mine.map((m) => el("g", { id: m.anchor }, m.titleEl, el("polygon", { points: pointsAttr(m.poly), fill })))
         )
       );
       groups.push(
-        el("path", { d: mine.map((m) => m.peaks).join(""), fill: "none", stroke: shade(fill), "stroke-width": 1.4, opacity: 0.8, "stroke-linejoin": "round", "stroke-linecap": "round" })
+        el("path", { d: mine.map((m) => m.peaks).join(""), fill: "none", stroke: shade(fill), "stroke-width": 1.4, opacity: 0.8, "stroke-linejoin": "round", "stroke-linecap": "round", mask: landMask })
       );
     }
     layers.lines.unshift(...groups);
@@ -4456,6 +4607,11 @@ function renderRegion(model, body, size, diagnostics = []) {
   labelJobs.sort((a, b) => a.priority - b.priority);
   for (const job of labelJobs) job.run();
   layers.labels.push(...labelBuckets[4], ...labelBuckets[3], ...labelBuckets[2], ...labelBuckets[1], ...labelBuckets[0]);
+  if (hasWater) {
+    body.push(
+      `<defs><mask id="${landMaskId}" maskUnits="userSpaceOnUse" x="0" y="0" width="${fmt(w)}" height="${fmt(h)}">` + el("rect", { x: 0, y: 0, width: w, height: h, fill: "#fff" }) + waterPolys.map((poly) => el("polygon", { points: pointsAttr(poly), fill: "#000" })).join("") + `</mask></defs>`
+    );
+  }
   body.push(...layers.water, ...layers.realms, ...layers.areas, ...layers.lines, ...layers.points, ...layers.labels);
 }
 function fitLabel(textStr, maxPx, baseSize, baseSpacing) {
