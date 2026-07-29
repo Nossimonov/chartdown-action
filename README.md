@@ -57,6 +57,24 @@ grid: square 30x22
 </details>
 ````
 
+**On GitHub only.** Markdown inside `<details>` is parsed by GitHub and by this Action, but **not by Obsidian** — the plugin's code-block processor never sees a fence inside a raw HTML block, so a note using this idiom renders a map on GitHub and shows a wall of source in your vault ([Chartdown#225](https://github.com/Nossimonov/Chartdown/issues/225)).
+
+If the same file is read in both places, fold it with an Obsidian callout instead. It stays Markdown all the way down, so both readers parse the fence:
+
+````markdown
+![The approach to the estate](./session-3.garls-estate.svg)
+
+> [!note]- Map source (Chartdown)
+> ```chartdown
+> # Garl's Estate
+> map: battlemap
+> grid: square 30x22
+> …
+> ```
+````
+
+Obsidian folds it and renders the map when expanded; GitHub shows a blockquote with an ordinary code block — readable, just not folded. Verified in a vault on plugin 0.2.1.
+
 ## Inputs
 
 | Input | Default | |
