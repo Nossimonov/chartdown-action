@@ -858,7 +858,7 @@ function inferArchetype(placements, section) {
 }
 
 // packages/core/src/parse.ts
-var SPEC_VERSION = "0.4";
+var SPEC_VERSION = "0.5";
 var MAP_TYPES = /* @__PURE__ */ new Set(["battlemap", "hexcrawl", "region"]);
 var KNOWN_HEADER_KEYS = /* @__PURE__ */ new Set([
   "map",
@@ -1900,6 +1900,12 @@ function visibilityPolygon(center, radius, blockers, steps = 180) {
   }
   return pts;
 }
+function shade(hex) {
+  if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return hex;
+  const n = parseInt(hex.slice(1), 16);
+  const dim = (v) => Math.max(0, Math.round(v * 0.8));
+  return `#${(dim(n >> 16 & 255) << 16 | dim(n >> 8 & 255) << 8 | dim(n & 255)).toString(16).padStart(6, "0")}`;
+}
 
 // packages/render-svg/src/grid.ts
 var CELL = 32;
@@ -1960,10 +1966,17 @@ function structureCells(e) {
   }
   return cells;
 }
-function surfaceCells(e) {
+function surfaceCells(e, ctx) {
   const width = Number(e.pairs.find((p) => p.key === "width")?.value ?? 1) || 1;
   const cells = /* @__PURE__ */ new Map();
   for (const p of e.placements) {
+    if (p.kind === "relational" && p.form === "side-of") {
+      if (!ctx) continue;
+      const course = ctx.courseOf(p.ref);
+      if (!course || course.length === 0) continue;
+      for (const [key, cell] of halfPlaneCells(p.compass, course, ctx.cols, ctx.rows)) cells.set(key, cell);
+      continue;
+    }
     if (p.kind === "shape" && p.shape === "path") {
       const vertices = p.args.filter((a) => a.kind === "address").map((a) => ({ col: colToNumber2(a.col), row: a.row }));
       for (const [key, cell] of pathBandCells(vertices, width)) cells.set(key, cell);
@@ -1971,6 +1984,59 @@ function surfaceCells(e) {
     }
     const flat = p.kind === "shape" ? p.args : [p];
     for (const [key, cell] of structureCells({ placements: flat })) cells.set(key, cell);
+  }
+  return cells;
+}
+function halfPlaneContext(doc, entities) {
+  return {
+    cols: doc.grid?.cols ?? 20,
+    rows: doc.grid?.rows ?? 15,
+    courseOf: (ref) => {
+      const host = entities.find((e) => ref.form === "id" ? e.ids.includes(ref.value) : e.name === ref.value);
+      if (!host) return null;
+      for (const p of host.placements) {
+        if (p.kind !== "shape" || p.shape !== "path") continue;
+        const vs = p.args.filter((a) => a.kind === "address").map((a) => ({ col: colToNumber2(a.col), row: a.row }));
+        if (vs.length > 1) return vs;
+      }
+      return null;
+    }
+  };
+}
+function halfPlaneCells(compass, course, cols, rows) {
+  const cells = /* @__PURE__ */ new Map();
+  const c = compass.toLowerCase();
+  const vertical = (c.includes("n") || c.includes("s")) && !c.includes("e") && !c.includes("w");
+  const near = c.includes("n") || c.includes("w");
+  const courseAt = (at) => {
+    const vals = [];
+    for (let i = 0; i < course.length - 1; i++) {
+      const a = course[i];
+      const b = course[i + 1];
+      const [a0, b0, a1, b1] = vertical ? [a.col, b.col, a.row, b.row] : [a.row, b.row, a.col, b.col];
+      const lo2 = Math.min(a0, b0);
+      const hi2 = Math.max(a0, b0);
+      if (at < lo2 || at > hi2) continue;
+      if (a0 === b0) {
+        vals.push(a1, b1);
+        continue;
+      }
+      vals.push(a1 + (b1 - a1) * (at - a0) / (b0 - a0));
+    }
+    if (vals.length === 0) return null;
+    return near ? Math.min(...vals) : Math.max(...vals);
+  };
+  const axis = course.map((p) => vertical ? p.col : p.row);
+  const lo = Math.min(...axis);
+  const hi = Math.max(...axis);
+  for (let col = 1; col <= cols; col++) {
+    for (let row = 1; row <= rows; row++) {
+      const at = vertical ? col : row;
+      const boundary = courseAt(Math.min(Math.max(at, lo), hi));
+      if (boundary === null) continue;
+      const here = vertical ? row : col;
+      if (near ? here < boundary : here > boundary) cells.set(cellKey({ col, row }), { col, row });
+    }
   }
   return cells;
 }
@@ -2083,6 +2149,184 @@ function mergeEdgeRuns(edges) {
   return runs;
 }
 
+// packages/render-svg/src/gridplacement.ts
+var handledElsewhere = (kind) => kind === "battlemap" ? /* @__PURE__ */ new Set(["side-of", "every-along"]) : /* @__PURE__ */ new Set(["every-along"]);
+var colLetters2 = (n) => {
+  let s = "";
+  let v = n;
+  while (v > 0) {
+    const r = (v - 1) % 26;
+    s = String.fromCharCode(65 + r) + s;
+    v = Math.floor((v - 1) / 26);
+  }
+  return s;
+};
+var addr = (col, row) => ({ kind: "address", col: colLetters2(col), row });
+function cellsOf(e) {
+  const out = [];
+  const push = (p) => {
+    if (p.kind === "address") out.push({ col: colToNumber2(p.col), row: p.row });
+    else if (p.kind === "range") {
+      const c1 = colToNumber2(p.from.col);
+      const c2 = colToNumber2(p.to.col);
+      out.push({ col: Math.round((c1 + c2) / 2), row: Math.round((p.from.row + p.to.row) / 2) });
+    } else if (p.kind === "shape") for (const a of p.args) push(a);
+  };
+  for (const p of e.placements) push(p);
+  return out;
+}
+function anchorCell(ref, byId, byName) {
+  const host = ref.form === "id" ? byId.get(ref.value) : byName.get(ref.value);
+  if (!host) return null;
+  const cells = cellsOf(host);
+  if (cells.length === 0) return null;
+  if (cells.length === 1) return cells[0];
+  return cells[Math.floor(cells.length / 2)];
+}
+function nearestOnCourse(ref, from, byId, byName) {
+  const host = ref.form === "id" ? byId.get(ref.value) : byName.get(ref.value);
+  if (!host) return null;
+  const cells = cellsOf(host);
+  if (cells.length === 0) return null;
+  let best = cells[0];
+  let bestD = Infinity;
+  for (const c of cells) {
+    const d = (c.col - from.col) ** 2 + (c.row - from.row) ** 2;
+    if (d < bestD) {
+      bestD = d;
+      best = c;
+    }
+  }
+  return best;
+}
+var formText = (p) => {
+  switch (p.form) {
+    case "near":
+      return `near ${p.target.kind === "ref" ? p.target.value : "(\u2026)"}`;
+    case "offset-of":
+      return `${p.measure} ${p.compass} of ${p.ref.value}`;
+    case "edge-of":
+      return `${p.compass} edge of ${p.ref.value}`;
+    case "along":
+      return `along ${p.ref.value}`;
+    case "at":
+      return "at (\u2026)";
+    case "side-of":
+      return `${p.compass} of ${p.ref.value}`;
+    case "on":
+      return `on ${p.ref.value}`;
+    case "from-to":
+      return "from \u2026 to \u2026";
+    default:
+      return p.form;
+  }
+};
+function resolveGridPlacements(entities, chainOf, diagnostics, kind = "battlemap") {
+  const byId = /* @__PURE__ */ new Map();
+  const byName = /* @__PURE__ */ new Map();
+  for (const e of entities) {
+    for (const id of e.ids) if (!byId.has(id)) byId.set(id, e);
+    if (e.name && !byName.has(e.name)) byName.set(e.name, e);
+  }
+  const exempt = handledElsewhere(kind);
+  const cellWord = kind === "hexcrawl" ? "hex" : "cell";
+  const instead = kind === "hexcrawl" ? "give the hex you mean (`C3`, or a range `C2..C4`)" : "give the cell you mean (`F6`, `D4..F6`, or `on <structure> at <cell>`)";
+  entities.forEach((e, index) => {
+    if (chainOf(e.typeWord).includes("note")) return;
+    const chain = chainOf(e.typeWord);
+    const isCrossing = chain.includes("ford") || chain.includes("bridge");
+    const hasCourse = e.placements.some((p) => p.kind === "relational" && p.form === "from-to");
+    let changed = false;
+    const placements = [];
+    for (const p of e.placements) {
+      if (p.kind !== "relational" || exempt.has(p.form)) {
+        placements.push(p);
+        continue;
+      }
+      if (p.form === "at") {
+        if (p.target.kind === "point") {
+          diagnostics.push({
+            severity: "error",
+            line: e.line,
+            message: `'${e.typeWord ?? "this"}' is placed at a gridless point on a ${kind} \u2014 ${instead} (spec 02 \xA77)`
+          });
+          continue;
+        }
+        placements.push(p.target);
+        changed = true;
+        continue;
+      }
+      if (p.form === "from-to" && kind === "battlemap") {
+        const ends = [];
+        let failed = false;
+        const resolveEnd = (at, join2, previous) => {
+          if (at.kind !== "ref") {
+            diagnostics.push({
+              severity: "error",
+              line: e.line,
+              message: `'${e.typeWord ?? "this"}' runs from or to a gridless point on a battlemap \u2014 name an entity, or draw it with \`path\` (spec 02 \xA77)`
+            });
+            failed = true;
+            return;
+          }
+          const cell = join2 && previous ? nearestOnCourse(at, previous, byId, byName) : anchorCell(at, byId, byName);
+          if (!cell) {
+            diagnostics.push({
+              severity: "error",
+              line: e.line,
+              message: `'${e.typeWord ?? "this"}' runs ${join2 ? "to join" : "to"} '${at.value}', which names no cell on this map \u2014 reference something placed, or draw it with \`path\` (spec 02 \xA77)`
+            });
+            failed = true;
+            return;
+          }
+          ends.push(cell);
+        };
+        resolveEnd(p.from.at, false, null);
+        resolveEnd(p.to.at, p.to.join === true, ends[0] ?? null);
+        if (failed || ends.length < 2) continue;
+        const shape = { kind: "shape", shape: "path", args: ends.map((c) => addr(c.col, c.row)) };
+        placements.push(shape);
+        changed = true;
+        continue;
+      }
+      if (p.form === "on") {
+        if (isCrossing && kind === "battlemap" || p.at !== void 0) {
+          placements.push(p);
+          continue;
+        }
+        diagnostics.push({
+          severity: "error",
+          line: e.line,
+          message: `'on ${p.ref.value}' names no ${cellWord} on a ${kind} \u2014 say where on it: \`on ${p.ref.value} at <${cellWord}>\` (spec 02 \xA77, #34)`
+        });
+        changed = true;
+        continue;
+      }
+      if (p.form === "along" && hasCourse) {
+        diagnostics.push({
+          severity: "warning",
+          line: e.line,
+          message: `'along ${p.ref.value}' is not applied on a ${kind} \u2014 the course runs straight between its anchors; place the cells with \`path\` to make it follow (spec 02 \xA77)`
+        });
+        changed = true;
+        continue;
+      }
+      diagnostics.push({
+        severity: "error",
+        line: e.line,
+        message: `'${formText(p)}' names no ${cellWord} on a ${kind} \u2014 this placement is satisfiable in more than one place, so ${instead} (spec 02 \xA77)`
+      });
+      changed = true;
+    }
+    if (changed) {
+      const clone = { ...e, placements };
+      entities[index] = clone;
+      if (e.name && byName.get(e.name) === e) byName.set(e.name, clone);
+      for (const id of e.ids) if (byId.get(id) === e) byId.set(id, clone);
+    }
+  });
+}
+
 // packages/render-svg/src/model.ts
 var pairOf = (pairs, key) => pairs.find((p) => p.key === key)?.value;
 function entityAnchor(e) {
@@ -2145,6 +2389,10 @@ function buildModel(doc, mode, theme, diagnostics = []) {
   expandEveryAlong(entities, doc, diagnostics);
   if (doc.mapType === "battlemap") {
     resolveRelativePlacements(entities, chainOf, resolvedNotes, diagnostics);
+    resolveGridPlacements(entities, chainOf, diagnostics, "battlemap");
+  }
+  if (doc.mapType === "hexcrawl") {
+    resolveGridPlacements(entities, chainOf, diagnostics, "hexcrawl");
   }
   const keys = labelsMode === "none" ? /* @__PURE__ */ new Map() : assignKeys(entities, hexLines, diagnostics, labelsMode === "keyed");
   return { doc, mode, entities, hexLines, labelOverrides, gmNotes, header, seed, theme, labelsMode, keys, chainOf, archetypeOf, facetOf, resolvedNotes };
@@ -2819,10 +3067,11 @@ function collectWalls(model) {
 }
 function impassableCells(model) {
   const winner = /* @__PURE__ */ new Map();
+  const hp = halfPlaneContext(model.doc, model.entities);
   for (const e of model.entities) {
     if (e.archetype !== "terrain" && e.archetype !== "path") continue;
     const impassable = model.chainOf(e.typeWord).includes("earth");
-    for (const [key, cell] of surfaceCells(e)) winner.set(key, { cell, impassable });
+    for (const [key, cell] of surfaceCells(e, hp)) winner.set(key, { cell, impassable });
   }
   const cells = /* @__PURE__ */ new Map();
   for (const [key, w] of winner) if (w.impassable) cells.set(key, w.cell);
@@ -2834,11 +3083,11 @@ function impassableCells(model) {
 }
 
 // packages/render-svg/src/lints.ts
-function surfaceByCell(entities, level) {
+function surfaceByCell(entities, level, hp) {
   const winner = /* @__PURE__ */ new Map();
   for (const e of entities) {
     if (e.level !== level || !laysSurface(e)) continue;
-    for (const key of surfaceCells(e).keys()) winner.set(key, e.typeWord ?? "");
+    for (const key of surfaceCells(e, hp).keys()) winner.set(key, e.typeWord ?? "");
   }
   return winner;
 }
@@ -2851,7 +3100,8 @@ function coherenceLints(model, level, diagnostics, ctx) {
   const all = ctx?.allEntities ?? model.entities;
   const on = (xs) => xs.filter((x) => x.level === level);
   const structures = on(model.entities.filter((e) => e.archetype === "structure"));
-  const surface = surfaceByCell(all, level);
+  const hp = halfPlaneContext(model.doc, all);
+  const surface = surfaceByCell(all, level, hp);
   const rock = impassableCells(model);
   const levelBelow = (() => {
     const i = ctx?.levels.indexOf(level) ?? -1;
@@ -2958,7 +3208,7 @@ function coherenceLints(model, level, diagnostics, ctx) {
     if (!landing) continue;
     const key = cellKey({ col: colNum(landing.col), row: landing.row });
     if (roomsOn(to).has(key)) continue;
-    const word = surfaceByCell(all, to).get(key);
+    const word = surfaceByCell(all, to, hp).get(key);
     if (word === void 0) continue;
     const chain = model.chainOf(word);
     if (chain.includes("terrace") || !chain.includes("air") && !chain.includes("earth")) continue;
@@ -2988,13 +3238,14 @@ function coherenceLints(model, level, diagnostics, ctx) {
     if (cells.size === 0) continue;
     for (const t of on(model.entities)) {
       if (t.archetype !== "terrain" && t.archetype !== "path") continue;
-      const tc = surfaceCells(t);
+      const tc = surfaceCells(t, hp);
       if (tc.size === 0) continue;
       const inside = [...tc.keys()].filter((k) => cells.has(k)).length;
       if (inside === 0) continue;
       if (inside === tc.size) continue;
       if (inside === cells.size) continue;
       const crossings = /* @__PURE__ */ new Set();
+      const at = [];
       for (const [key, c] of cells) {
         if (!tc.has(key)) continue;
         const sides = [
@@ -3007,13 +3258,16 @@ function coherenceLints(model, level, diagnostics, ctx) {
           const nk = cellKey(n);
           if (cells.has(nk) || !tc.has(nk)) continue;
           crossings.add(segKey(edgeSegment({ kind: "address", col: colLetters(c.col), row: c.row }, dir)));
+          at.push(`${colLetters(c.col)}${c.row}.${dir}`);
         }
       }
       if (crossings.size > 0 && [...crossings].every((k) => openingSegs.has(k))) continue;
+      const where = at.slice(0, 3).join(", ") + (at.length > 3 ? `, and ${at.length - 3} more` : "");
+      const structureName = `${s.name ?? s.ids[0] ?? s.typeWord ?? "a structure"}' (line ${s.line})`;
       diagnostics.push({
         severity: "warning",
         line: t.line,
-        message: `'${t.typeWord ?? "terrain"}' runs both inside and outside a structure's footprint, crossing its wall where there is no opening \u2014 terrain that stays wholly inside a room (a pool, a dais) is fine, as is terrain that crosses at a door (spec 06 \xA76)`
+        message: `'${t.typeWord ?? "terrain"}' runs both inside and outside '${structureName}, crossing its wall${at.length > 0 ? ` at ${where}` : ""} where there is no opening \u2014 terrain that stays wholly inside a room (a pool, a dais) is fine, as is terrain that crosses at a door (spec 06 \xA76)`
       });
       break;
     }
@@ -3052,6 +3306,7 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
     fieldHoles.set(field, list);
   };
   let noteCourseCount = 0;
+  let terrainCourseCount = 0;
   let openEdgeCache = null;
   const openingEdgeKeys = () => {
     if (openEdgeCache) return openEdgeCache;
@@ -3071,6 +3326,8 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
   const pathRecords = [];
   const crossingCells = /* @__PURE__ */ new Set();
   const pendingCrossings = [];
+  const pendingHalfPlanes = [];
+  const pendingTerrainLabels = [];
   const sightBlockers = collectWalls(model).blockers;
   const labelObstructions = [];
   for (const e of model.entities) {
@@ -3153,7 +3410,10 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
       layers.grid.push(text(String(r), { x: MARGIN - 7, y: MARGIN + (r - 0.5) * CELL + 3, "font-size": 9, fill: "#8a8272", "text-anchor": "end", "font-family": "sans-serif" }));
     }
   }
+  for (const pending of pendingHalfPlanes) renderHalfPlane(pending);
   for (const pending of pendingCrossings) renderCrossing(pending);
+  for (const t of pendingTerrainLabels) if (t.course) renderCourseLabel(t);
+  for (const t of pendingTerrainLabels) if (!t.course) renderAreaLabel(t);
   coherenceLints(model, levelCtx?.level ?? model.doc.defaultLevel, diagnostics, levelCtx);
   if (levelCtx) {
     for (const source of levelCtx.allEntities) {
@@ -3379,11 +3639,15 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
         "stroke-linejoin": "round",
         "clip-path": `url(#${clipId})`
       });
+      const stop = chain.findIndex((w) => w === "ford" || w === "bridge");
+      const xingChain = stop >= 0 ? chain.slice(0, stop + 1) : chain;
+      const themedFill = model.theme.prop(xingChain, "fill");
+      const themedStroke = model.theme.prop(xingChain, "stroke");
       if (isBridge) {
-        scope.push(band("#6b4a26", hostRec.width + 6));
-        scope.push(band("#a8763e", hostRec.width));
+        scope.push(band(themedStroke ?? (themedFill ? shade(themedFill) : "#6b4a26"), hostRec.width + 6));
+        scope.push(band(themedFill ?? "#a8763e", hostRec.width));
       } else {
-        scope.push(band("#c2d4dc", hostRec.width));
+        scope.push(band(themedFill ?? "#c2d4dc", hostRec.width));
         if (e.flags.includes("difficult")) scope.push(band("url(#hatch)", hostRec.width));
       }
       if (atCell?.kind === "address" && cells.length > 0) {
@@ -3604,6 +3868,17 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
           pathParts.push(el("polyline", { points: pointsAttr(drawn), fill: "none", stroke: bandStroke, "stroke-width": width, "stroke-linecap": "butt", "stroke-linejoin": "round" }));
         }
         pathRecords.push({ e, cells: cellsAlong(pts), isWater: chain.includes("river"), isRoad: chain.includes("road"), pts, width });
+        pendingTerrainLabels.push({ e, course: drawn });
+      } else if (p.kind === "relational" && p.form === "side-of") {
+        pendingHalfPlanes.push({
+          e,
+          compass: p.compass,
+          ref: p.ref,
+          slot: layers.areas.push("") - 1,
+          titleEl,
+          anchor
+        });
+        if (!pendingTerrainLabels.some((t) => t.e === e)) pendingTerrainLabels.push({ e, course: null });
       } else if (p.kind === "range") {
         const r = rangeRect(p);
         areaParts.push(el("rect", { x: r.x, y: r.y, width: r.w, height: r.h, fill, opacity: 0.85 }));
@@ -3614,8 +3889,115 @@ function renderBattlemap(model, body, frame, diagnostics, levelCtx) {
         areaParts.push(el("rect", { x: o.x, y: o.y, width: CELL, height: CELL, fill }));
       }
     }
+    if (areaParts.length > 0 && !pendingTerrainLabels.some((t) => t.e === e)) pendingTerrainLabels.push({ e, course: null });
     if (areaParts.length > 0) layers.areas.push(el("g", { id: pathParts.length === 0 ? anchor : void 0 }, titleEl, ...areaParts));
     if (pathParts.length > 0) layers.paths.push(el("g", { id: anchor }, titleEl, ...pathParts));
+  }
+  function renderHalfPlane(p) {
+    const host = pathRecords.find((r) => p.ref.form === "id" ? r.e.ids.includes(p.ref.value) : r.e.name === p.ref.value);
+    if (!host || host.pts.length < 2) {
+      diagnostics.push({
+        severity: "warning",
+        line: p.e.line,
+        message: `'${p.e.typeWord ?? "terrain"}' is placed ${p.compass} of '${p.ref.value}', which declares no course to take a side of \u2014 reference a path, or give the cells (spec 06 \xA76)`
+      });
+      return;
+    }
+    const chain = model.chainOf(p.e.typeWord);
+    const poly = halfPlaneArea(p.compass, extendToCellEdge(host.pts), frame);
+    if (poly.length < 3) return;
+    const parts = [el("polygon", { points: pointsAttr(poly), fill: model.theme.terrainFill(chain), opacity: 0.85 })];
+    if (p.e.flags.includes("difficult")) parts.push(el("polygon", { points: pointsAttr(poly), fill: "url(#hatch)" }));
+    layers.areas[p.slot] = el("g", { id: p.anchor }, p.titleEl, ...parts);
+  }
+  function terrainLabelText(e) {
+    if (!e.name || e.flags.includes("nolabel") || !labelsOn(model)) return null;
+    return labelTextFor(model, e) ?? e.name;
+  }
+  function alongCourse(course, t) {
+    const segs = [];
+    let total = 0;
+    for (let i = 0; i < course.length - 1; i++) {
+      const d = Math.hypot(course[i + 1].x - course[i].x, course[i + 1].y - course[i].y);
+      segs.push(d);
+      total += d;
+    }
+    let want = total * t;
+    for (let i = 0; i < segs.length; i++) {
+      if (want > segs[i]) {
+        want -= segs[i];
+        continue;
+      }
+      const f2 = segs[i] === 0 ? 0 : want / segs[i];
+      return {
+        x: course[i].x + (course[i + 1].x - course[i].x) * f2,
+        y: course[i].y + (course[i + 1].y - course[i].y) * f2
+      };
+    }
+    return course[course.length - 1];
+  }
+  function renderCourseLabel(t) {
+    const label = terrainLabelText(t.e);
+    if (label === null || !t.course || t.course.length < 2) return;
+    const course = t.course;
+    const w = label.length * 9 * 0.58;
+    const footprint = (frac) => {
+      const at = alongCourse(course, frac);
+      const a = alongCourse(course, Math.max(0, frac - 0.02));
+      const b = alongCourse(course, Math.min(1, frac + 0.02));
+      return Math.abs(b.x - a.x) >= Math.abs(b.y - a.y) ? { x: at.x - w / 2, y: at.y - 9, w, h: 10 } : { x: at.x - 10, y: at.y - w / 2, w: 10, h: w };
+    };
+    const clash = (frac) => {
+      const box = footprint(frac);
+      let overlap = 0;
+      for (const o of labelObstructions) {
+        const ox = Math.max(0, Math.min(box.x + box.w, o.x + o.w) - Math.max(box.x, o.x));
+        const oy = Math.max(0, Math.min(box.y + box.h, o.y + o.h) - Math.max(box.y, o.y));
+        overlap += ox * oy;
+      }
+      return overlap;
+    };
+    const offsets = [50, 42, 58, 34, 66, 26, 74, 18, 82];
+    let best = offsets[0];
+    let bestClash = Infinity;
+    for (const o of offsets) {
+      const c = clash(o / 100);
+      if (c < bestClash) {
+        bestClash = c;
+        best = o;
+      }
+      if (c === 0) break;
+    }
+    labelObstructions.push(footprint(best / 100));
+    const pid = `cdterrain-${model.doc.docId}-${terrainCourseCount++}`;
+    const leftward = course[course.length - 1].x < course[0].x;
+    const lettered = leftward ? [...course].reverse() : course;
+    const offset = leftward ? 100 - best : best;
+    const d = `M${fmt(lettered[0].x)} ${fmt(lettered[0].y)}` + lettered.slice(1).map((p) => `L${fmt(p.x)} ${fmt(p.y)}`).join("");
+    layers.roomLabels.push(
+      `<defs><path id="${pid}" d="${d}"/></defs><text font-size="9" fill="${INK}" opacity="0.85" text-anchor="middle" font-family="sans-serif"${model.labelsMode === "keyed" ? ' font-weight="bold"' : ""}><textPath href="#${pid}" startOffset="${offset}%"><tspan dy="-3">${esc(label)}</tspan></textPath></text>`
+    );
+  }
+  function renderAreaLabel(t) {
+    const label = terrainLabelText(t.e);
+    if (label === null) return;
+    const cells = surfaceCells(t.e, halfPlaneContext(model.doc, model.entities));
+    if (cells.size === 0) return;
+    const at = placeRoomLabel(label, cells);
+    const w = label.length * 10 * 0.58;
+    labelObstructions.push({ x: at.x - w / 2, y: at.y - 8, w, h: 10 });
+    layers.roomLabels.push(
+      text(label, {
+        x: at.x,
+        y: at.y,
+        "font-size": 10,
+        fill: INK,
+        "font-weight": model.labelsMode === "keyed" ? "bold" : void 0,
+        opacity: 0.8,
+        "text-anchor": "middle",
+        "font-family": "sans-serif"
+      })
+    );
   }
   function renderStructure(e, into, titleEl, anchor) {
     const cells = structureCells(e);
@@ -4239,6 +4621,30 @@ function openingStateMarks(e, s, stroke, width, paper) {
   }
   return out;
 }
+function halfPlaneArea(compass, course, frame) {
+  const left = MARGIN;
+  const top = MARGIN;
+  const right = MARGIN + frame.cols * CELL;
+  const bottom = MARGIN + frame.rows * CELL;
+  const clampX = (x) => Math.min(Math.max(x, left), right);
+  const clampY = (y) => Math.min(Math.max(y, top), bottom);
+  const inside = course.map((p) => ({ x: clampX(p.x), y: clampY(p.y) }));
+  const c = compass.toLowerCase();
+  const first = inside[0];
+  const last = inside[inside.length - 1];
+  if ((c.includes("n") || c.includes("s")) && !c.includes("e") && !c.includes("w")) {
+    const edgeY = c.includes("n") ? top : bottom;
+    const ltr = first.x <= last.x;
+    const x0 = ltr ? left : right;
+    const x1 = ltr ? right : left;
+    return [{ x: x0, y: first.y }, ...inside, { x: x1, y: last.y }, { x: x1, y: edgeY }, { x: x0, y: edgeY }];
+  }
+  const edgeX = c.includes("w") ? left : right;
+  const ttb = first.y <= last.y;
+  const y0 = ttb ? top : bottom;
+  const y1 = ttb ? bottom : top;
+  return [{ x: first.x, y: y0 }, ...inside, { x: last.x, y: y1 }, { x: edgeX, y: y1 }, { x: edgeX, y: y0 }];
+}
 function extendToCellEdge(pts) {
   if (pts.length < 2) return pts;
   const out = pts.map((p) => ({ ...p }));
@@ -4625,8 +5031,8 @@ function renderHexcrawl(model, body) {
     return out;
   };
   for (const line of model.hexLines) {
-    for (const addr of line.addresses) {
-      for (const { col, row } of expand(addr)) {
+    for (const addr2 of line.addresses) {
+      for (const { col, row } of expand(addr2)) {
         cells.set(keyOf(col, row), {
           terrain: line.terrain,
           contents: line.contents,
@@ -4694,7 +5100,7 @@ function renderHexcrawl(model, body) {
         }
       }
       if (numbersOn && !fogged) {
-        labelLayer.push(text(`${colLetters2(col)}${row}`, { x: c.x - hexW * 0.26, y: c.y - R * 0.45, "font-size": 6, fill: "#8a8272", opacity: 0.75, "text-anchor": "middle", "font-family": "sans-serif" }));
+        labelLayer.push(text(`${colLetters3(col)}${row}`, { x: c.x - hexW * 0.26, y: c.y - R * 0.45, "font-size": 6, fill: "#8a8272", opacity: 0.75, "text-anchor": "middle", "font-family": "sans-serif" }));
       }
       hexLayer.push(el("g", {}, ...parts));
     }
@@ -4819,7 +5225,7 @@ function glyph(word, at) {
 function neighborDeltas(isShifted) {
   return isShifted ? { e: { x: 1, y: 0 }, w: { x: -1, y: 0 }, ne: { x: 1, y: -1 }, nw: { x: 0, y: -1 }, se: { x: 1, y: 1 }, sw: { x: 0, y: 1 } } : { e: { x: 1, y: 0 }, w: { x: -1, y: 0 }, ne: { x: 0, y: -1 }, nw: { x: -1, y: -1 }, se: { x: 0, y: 1 }, sw: { x: -1, y: 1 } };
 }
-function colLetters2(n) {
+function colLetters3(n) {
   let s = "";
   while (n > 0) {
     const rem = (n - 1) % 26;
@@ -5369,7 +5775,7 @@ function isSimple(curve) {
   const cell = Math.max(Math.hypot(maxX - minX, maxY - minY) / Math.max(16, Math.sqrt(segs)), 1e-9);
   const cols = Math.floor((maxX - minX) / cell) + 1;
   const buckets = /* @__PURE__ */ new Map();
-  const cellsOf = (i) => {
+  const cellsOf2 = (i) => {
     const a = curve[i], b = curve[i + 1];
     const gx0 = Math.floor((Math.min(a.x, b.x) - minX) / cell);
     const gx1 = Math.floor((Math.max(a.x, b.x) - minX) / cell);
@@ -5380,7 +5786,7 @@ function isSimple(curve) {
     return keys;
   };
   for (let i = 0; i < segs; i++) {
-    for (const key of cellsOf(i)) {
+    for (const key of cellsOf2(i)) {
       const bucket = buckets.get(key);
       if (bucket) bucket.push(i);
       else buckets.set(key, [i]);
@@ -5389,7 +5795,7 @@ function isSimple(curve) {
   const tested = /* @__PURE__ */ new Set();
   for (let i = 0; i < segs; i++) {
     tested.clear();
-    for (const key of cellsOf(i)) {
+    for (const key of cellsOf2(i)) {
       for (const j of buckets.get(key) ?? []) {
         if (j < i + 2 || tested.has(j)) continue;
         tested.add(j);
@@ -6931,7 +7337,7 @@ function renderRegion(model, body, size, diagnostics = []) {
           }) : el("circle", { cx: r.point.x, cy: r.point.y, r: tier.r, fill: ink, stroke: "#fff", "stroke-width": 1 })
         )
       );
-      const label = (e.name !== null ? labelTextFor(model, e) ?? e.name : null) ?? (e.typeWord === "note" ? e.texts[0] ?? null : null) ?? (hasTierGlyph(chain) ? null : e.typeWord);
+      const label = (e.name !== null ? labelTextFor(model, e) ?? e.name : null) ?? (hasTierGlyph(chain) ? null : e.typeWord);
       if (label && !e.flags.includes("nolabel") && !overridden(e) && labelsOn(model, e)) {
         const pt = r.point;
         deferLabel(2.2 + (24 - tier.font) / 100, () => {
@@ -7472,12 +7878,6 @@ function centroid(pts) {
     y += p.y;
   }
   return { x: x / pts.length, y: y / pts.length };
-}
-function shade(hex) {
-  if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return hex;
-  const n = parseInt(hex.slice(1), 16);
-  const dim = (v) => Math.max(0, Math.round(v * 0.8));
-  return `#${(dim(n >> 16 & 255) << 16 | dim(n >> 8 & 255) << 8 | dim(n & 255)).toString(16).padStart(6, "0")}`;
 }
 function glyphEl(pathData, x, y, scale, ink) {
   return `<path d="${pathData}" transform="translate(${fmt(x)} ${fmt(y)}) scale(${fmt(scale)})" fill="none" stroke="${ink}" stroke-width="1.6" vector-effect="non-scaling-stroke" stroke-linecap="round"/>`;
